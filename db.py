@@ -87,6 +87,17 @@ def create_tables(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_noun_occ_file ON noun_occurrences(fileID);
         CREATE INDEX IF NOT EXISTS idx_name_occ_file ON name_occurrences(fileID);
         CREATE INDEX IF NOT EXISTS idx_verb_occ_file ON verb_occurrences(fileID);
+
+        CREATE INDEX IF NOT EXISTS idx_noun_occ_noun ON noun_occurrences(nounID);
+        CREATE INDEX IF NOT EXISTS idx_name_occ_name ON name_occurrences(nameID);
+        CREATE INDEX IF NOT EXISTS idx_verb_occ_verb ON verb_occurrences(verbID);
+
+        CREATE INDEX IF NOT EXISTS idx_noun_sent_occ1 ON noun_sentence(occ1_type, occ1_id);
+        CREATE INDEX IF NOT EXISTS idx_noun_sent_occ2 ON noun_sentence(occ2_type, occ2_id);
+        CREATE INDEX IF NOT EXISTS idx_noun_para_occ1 ON noun_paragraph(occ1_type, occ1_id);
+        CREATE INDEX IF NOT EXISTS idx_noun_para_occ2 ON noun_paragraph(occ2_type, occ2_id);
+        CREATE INDEX IF NOT EXISTS idx_nvs_noun_occ   ON noun_verb_sentence(noun_occ_type, noun_occ_id);
+        CREATE INDEX IF NOT EXISTS idx_nvs_verb_occ   ON noun_verb_sentence(verb_occ_id);
     """)
     conn.commit()
 
