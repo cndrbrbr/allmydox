@@ -5,7 +5,16 @@ from typing import NamedTuple
 
 import spacy
 
+# Sentences or paragraphs with more entities than this produce no co-occurrence pairs.
+# Keeps the DB from exploding on dense legal/technical paragraphs.
+MAX_ENTITIES_PER_CONTEXT = 15
+
 _nlp_cache: dict[str, spacy.language.Language] = {}
+
+# Module-level word→ID caches; survive across documents within one run.
+_noun_ids: dict[str, int] = {}
+_name_ids: dict[str, int] = {}
+_verb_ids: dict[str, int] = {}
 
 
 def get_nlp(model: str) -> spacy.language.Language:
@@ -14,9 +23,43 @@ def get_nlp(model: str) -> spacy.language.Language:
     return _nlp_cache[model]
 
 
+def prime_caches(conn: sqlite3.Connection):
+    """Load all existing vocabulary into the in-memory caches."""
+    _noun_ids.update(conn.execute("SELECT noun, nounID FROM nouns").fetchall())
+    _name_ids.update(conn.execute("SELECT name, nameID FROM names").fetchall())
+    _verb_ids.update(conn.execute("SELECT verb, verbID FROM verbs").fetchall())
+
+
 class _OccRef(NamedTuple):
     type: str   # 'noun', 'name', or 'verb'
     id: int
+
+
+def _noun_id(conn, word: str) -> int:
+    if word not in _noun_ids:
+        conn.execute("INSERT OR IGNORE INTO nouns (noun) VALUES (?)", (word,))
+        _noun_ids[word] = conn.execute(
+            "SELECT nounID FROM nouns WHERE noun = ?", (word,)
+        ).fetchone()[0]
+    return _noun_ids[word]
+
+
+def _name_id(conn, word: str) -> int:
+    if word not in _name_ids:
+        conn.execute("INSERT OR IGNORE INTO names (name) VALUES (?)", (word,))
+        _name_ids[word] = conn.execute(
+            "SELECT nameID FROM names WHERE name = ?", (word,)
+        ).fetchone()[0]
+    return _name_ids[word]
+
+
+def _verb_id(conn, word: str) -> int:
+    if word not in _verb_ids:
+        conn.execute("INSERT OR IGNORE INTO verbs (verb) VALUES (?)", (word,))
+        _verb_ids[word] = conn.execute(
+            "SELECT verbID FROM verbs WHERE verb = ?", (word,)
+        ).fetchone()[0]
+    return _verb_ids[word]
 
 
 def process_document(
@@ -25,9 +68,11 @@ def process_document(
     pages: list[tuple[int, str]],
     model: str = "en_core_web_sm",
 ):
-    import db
-
     nlp = get_nlp(model)
+
+    noun_sent_batch:  list[tuple] = []
+    noun_para_batch:  list[tuple] = []
+    noun_verb_batch:  list[tuple] = []
 
     for page_num, page_text in pages:
         para_spans = _paragraph_spans(page_text)
@@ -42,7 +87,7 @@ def process_document(
 
             for sent in doc.sents:
                 sent_entity_occs: list[_OccRef] = []
-                sent_verb_occs: list[_OccRef] = []
+                sent_verb_occs:   list[_OccRef] = []
 
                 for token in sent:
                     if not token.is_alpha:
@@ -51,41 +96,62 @@ def process_document(
                     if not lemma:
                         continue
 
-                    # position is the character offset within the full page text
                     position = para_start + token.idx
 
                     if token.pos_ == "NOUN":
-                        noun_id = db.get_or_create_noun(conn, lemma)
-                        occ_id = db.insert_noun_occurrence(conn, file_id, noun_id, page_num, position)
-                        ref = _OccRef("noun", occ_id)
+                        nid = _noun_id(conn, lemma)
+                        cur = conn.execute(
+                            "INSERT INTO noun_occurrences "
+                            "(fileID, nounID, pagenumber, position) VALUES (?,?,?,?)",
+                            (file_id, nid, page_num, position),
+                        )
+                        ref = _OccRef("noun", cur.lastrowid)
                         sent_entity_occs.append(ref)
                         para_entity_occs.append(ref)
 
                     elif token.pos_ == "PROPN":
-                        # Preserve original casing for proper names
-                        name_id = db.get_or_create_name(conn, token.text)
-                        occ_id = db.insert_name_occurrence(conn, file_id, name_id, page_num, position)
-                        ref = _OccRef("name", occ_id)
+                        nid = _name_id(conn, token.text)
+                        cur = conn.execute(
+                            "INSERT INTO name_occurrences "
+                            "(fileID, nameID, pagenumber, position) VALUES (?,?,?,?)",
+                            (file_id, nid, page_num, position),
+                        )
+                        ref = _OccRef("name", cur.lastrowid)
                         sent_entity_occs.append(ref)
                         para_entity_occs.append(ref)
 
                     elif token.pos_ == "VERB" and not token.is_stop:
-                        verb_id = db.get_or_create_verb(conn, lemma)
-                        occ_id = db.insert_verb_occurrence(conn, file_id, verb_id, page_num, position)
-                        sent_verb_occs.append(_OccRef("verb", occ_id))
+                        vid = _verb_id(conn, lemma)
+                        cur = conn.execute(
+                            "INSERT INTO verb_occurrences "
+                            "(fileID, verbID, pagenumber, position) VALUES (?,?,?,?)",
+                            (file_id, vid, page_num, position),
+                        )
+                        sent_verb_occs.append(_OccRef("verb", cur.lastrowid))
 
-                # Sentence-level noun/name pairs
-                for a, b in combinations(sent_entity_occs, 2):
-                    db.insert_noun_sentence(conn, a.type, a.id, b.type, b.id)
+                if len(sent_entity_occs) <= MAX_ENTITIES_PER_CONTEXT:
+                    for a, b in combinations(sent_entity_occs, 2):
+                        noun_sent_batch.append((a.type, a.id, b.type, b.id))
+                    for e in sent_entity_occs:
+                        for v in sent_verb_occs:
+                            noun_verb_batch.append((e.type, e.id, v.id))
 
-                # Sentence-level noun/name + verb pairs
-                for entity_ref in sent_entity_occs:
-                    for verb_ref in sent_verb_occs:
-                        db.insert_noun_verb_sentence(conn, entity_ref.type, entity_ref.id, verb_ref.id)
+            if len(para_entity_occs) <= MAX_ENTITIES_PER_CONTEXT:
+                for a, b in combinations(para_entity_occs, 2):
+                    noun_para_batch.append((a.type, a.id, b.type, b.id))
 
-            # Paragraph-level noun/name pairs
-            for a, b in combinations(para_entity_occs, 2):
-                db.insert_noun_paragraph(conn, a.type, a.id, b.type, b.id)
+    conn.executemany(
+        "INSERT INTO noun_sentence (occ1_type,occ1_id,occ2_type,occ2_id) VALUES (?,?,?,?)",
+        noun_sent_batch,
+    )
+    conn.executemany(
+        "INSERT INTO noun_paragraph (occ1_type,occ1_id,occ2_type,occ2_id) VALUES (?,?,?,?)",
+        noun_para_batch,
+    )
+    conn.executemany(
+        "INSERT INTO noun_verb_sentence (noun_occ_type,noun_occ_id,verb_occ_id) VALUES (?,?,?)",
+        noun_verb_batch,
+    )
 
 
 def _paragraph_spans(text: str) -> list[tuple[int, int]]:

@@ -24,10 +24,14 @@ def cmd_process(args):
 
     conn = db.connect(args.db)
     db.create_tables(conn)
+    processor.prime_caches(conn)
 
-    for doc_path in doc_files:
+    total = len(doc_files)
+    width = len(str(total))
+
+    for idx, doc_path in enumerate(doc_files, start=1):
         rel = doc_path.relative_to(directory)
-        print(f"  {rel} ... ", end="", flush=True)
+        print(f"  [{idx:{width}}/{total}] {rel} ... ", end="", flush=True)
 
         if db.document_exists(conn, str(doc_path.parent), doc_path.name):
             print("skipped (already indexed)")
