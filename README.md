@@ -81,6 +81,86 @@ python3 main.py --db ~/myindex.db stats
 
 The database is a standard SQLite file and can be opened with any SQLite browser (e.g. [DB Browser for SQLite](https://sqlitebrowser.org/)).
 
+```mermaid
+erDiagram
+    documents {
+        int fileID PK
+        text filename
+        text folderpath
+        int size
+        text extension
+    }
+    nouns {
+        int nounID PK
+        text noun
+    }
+    noun_occurrences {
+        int nounOccurrenceID PK
+        int fileID FK
+        int nounID FK
+        int pagenumber
+        int position
+    }
+    names {
+        int nameID PK
+        text name
+    }
+    name_occurrences {
+        int nameOccurrenceID PK
+        int fileID FK
+        int nameID FK
+        int pagenumber
+        int position
+    }
+    verbs {
+        int verbID PK
+        text verb
+    }
+    verb_occurrences {
+        int verbOccurrenceID PK
+        int fileID FK
+        int verbID FK
+        int pagenumber
+        int position
+    }
+    noun_sentence {
+        int nounsentenceID PK
+        text occ1_type
+        int occ1_id
+        text occ2_type
+        int occ2_id
+    }
+    noun_paragraph {
+        int nounparagraphID PK
+        text occ1_type
+        int occ1_id
+        text occ2_type
+        int occ2_id
+    }
+    noun_verb_sentence {
+        int nounverbsentenceID PK
+        text noun_occ_type
+        int noun_occ_id
+        int verb_occ_id FK
+    }
+
+    documents          ||--o{ noun_occurrences  : "contains"
+    documents          ||--o{ name_occurrences  : "contains"
+    documents          ||--o{ verb_occurrences  : "contains"
+    nouns              ||--o{ noun_occurrences  : "occurs as"
+    names              ||--o{ name_occurrences  : "occurs as"
+    verbs              ||--o{ verb_occurrences  : "occurs as"
+    noun_occurrences   ||--o{ noun_sentence     : "occ1/occ2 (noun)"
+    name_occurrences   ||--o{ noun_sentence     : "occ1/occ2 (name)"
+    noun_occurrences   ||--o{ noun_paragraph    : "occ1/occ2 (noun)"
+    name_occurrences   ||--o{ noun_paragraph    : "occ1/occ2 (name)"
+    noun_occurrences   ||--o{ noun_verb_sentence : "noun_occ (noun)"
+    name_occurrences   ||--o{ noun_verb_sentence : "noun_occ (name)"
+    verb_occurrences   ||--o{ noun_verb_sentence : "verb_occ"
+```
+
+
+
 ### `documents`
 One row per indexed file.
 
