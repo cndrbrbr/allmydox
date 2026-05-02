@@ -58,12 +58,25 @@ def _folder_models(folder: Path) -> list[str]:
     result = []
     for d in sorted(folder.iterdir()):
         if d.is_dir() and (d / "meta.json").exists():
-            try:
-                meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-                result.append(meta.get("name") or d.name)
-            except Exception:
-                result.append(d.name)
+            result.append(d.name)   # directory name IS the package name (e.g. de_core_news_lg)
     return result
+
+
+def _model_data_path(models_folder: Path, model_name: str) -> str | None:
+    """Return the spaCy model data directory path for a folder-installed model.
+
+    pip --target installs de_core_news_lg as:
+      <folder>/de_core_news_lg/de_core_news_lg-3.8.0/   <- model data here
+    spacy.load() accepts this path directly, which is more robust than
+    sys.path manipulation.
+    """
+    pkg_dir = models_folder / model_name
+    if not pkg_dir.is_dir():
+        return None
+    for sub in sorted(pkg_dir.iterdir()):
+        if sub.is_dir() and (sub / "config.cfg").exists():
+            return str(sub)
+    return None
 
 
 def _system_models() -> list[str]:
@@ -127,11 +140,13 @@ class _IndexWorker(QThread):
 
     def run(self):
         try:
-            # Make custom models folder visible to spaCy
+            # Resolve model: use full data path for folder-installed models,
+            # fall back to model name for system-installed ones.
+            model_to_use = self._model
             if self._models_folder:
-                mf = str(Path(self._models_folder))
-                if mf not in sys.path:
-                    sys.path.insert(0, mf)
+                data_path = _model_data_path(Path(self._models_folder), self._model)
+                if data_path:
+                    model_to_use = data_path
 
             directory = Path(self._directory).resolve()
             doc_files = []
@@ -189,7 +204,7 @@ class _IndexWorker(QThread):
                         mtime=file_mtime,
                     )
                     pages = extractor.extract(doc_path)
-                    processor.process_document(conn, file_id, pages, model=self._model)
+                    processor.process_document(conn, file_id, pages, model=model_to_use)
                     conn.commit()
                     if is_update:
                         upd_count += 1
