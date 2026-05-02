@@ -1,7 +1,10 @@
 """GUI front-end for allmydox — select a folder and a database, then index."""
 from __future__ import annotations
 
+import datetime
 import json
+import os
+import platform
 import subprocess
 import sys
 import traceback
@@ -19,6 +22,27 @@ from PyQt6.QtGui import QTextCursor, QColor
 import db
 import extractor
 import processor
+
+
+# ---------------------------------------------------------------------------
+# Import log helpers
+# ---------------------------------------------------------------------------
+
+def _log_path(db_path: str) -> Path:
+    """Return the import log file path next to the database."""
+    p = Path(db_path)
+    return p.with_name(p.stem + ".import.log")
+
+
+def _open_file(path: Path):
+    """Open a file with the system default application."""
+    try:
+        if platform.system() == "Windows":
+            os.startfile(str(path))
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +153,8 @@ class _IndexWorker(QThread):
     done     = pyqtSignal(bool, str)
 
     def __init__(self, directory: str, db_path: str, model: str,
-                 models_folder: str, exts: list[str], reindex_changed: bool):
+                 models_folder: str, exts: list[str], reindex_changed: bool,
+                 log_path: str):
         super().__init__()
         self._directory       = directory
         self._db_path         = db_path
@@ -137,12 +162,20 @@ class _IndexWorker(QThread):
         self._models_folder   = models_folder
         self._exts            = exts
         self._reindex_changed = reindex_changed
+        self._log_path        = log_path
         self._stop_requested  = False
 
     def request_stop(self):
         self._stop_requested = True
 
     def run(self):
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_lines: list[str] = []
+
+        def _emit(text: str):
+            self.log.emit(text)
+            log_lines.append(text)
+
         try:
             # Resolve model: use full data path for folder-installed models,
             # fall back to model name for system-installed ones.
@@ -158,7 +191,7 @@ class _IndexWorker(QThread):
                 e = ext if ext.startswith(".") else f".{ext}"
                 doc_files.extend(sorted(directory.rglob(f"*{e}")))
 
-            self.log.emit(f"Found {len(doc_files)} document(s) in '{directory}'.")
+            _emit(f"Found {len(doc_files)} document(s) in '{directory}'.")
             self.progress.emit(0, len(doc_files))
 
             conn = db.connect(self._db_path)
@@ -169,35 +202,31 @@ class _IndexWorker(QThread):
             width      = len(str(total))
             new_count  = 0
             upd_count  = 0
+            err_count  = 0
 
             for idx, doc_path in enumerate(doc_files, start=1):
                 if self._stop_requested:
                     break
-                rel       = doc_path.relative_to(directory)
+                rel        = doc_path.relative_to(directory)
                 file_mtime = doc_path.stat().st_mtime
-                info      = db.get_document_info(conn, str(doc_path.parent), doc_path.name)
+                info       = db.get_document_info(conn, str(doc_path.parent), doc_path.name)
 
                 if info is not None:
                     file_id, stored_mtime = info
                     if stored_mtime is not None and stored_mtime == file_mtime:
-                        self.log.emit(
-                            f"  [{idx:{width}}/{total}] {rel}  —  skipped (unchanged)"
-                        )
+                        _emit(f"  [{idx:{width}}/{total}] {rel}  —  skipped (unchanged)")
                         self.progress.emit(idx, total)
                         continue
                     if not self._reindex_changed or stored_mtime is None:
-                        self.log.emit(
-                            f"  [{idx:{width}}/{total}] {rel}  —  skipped (already indexed)"
-                        )
+                        _emit(f"  [{idx:{width}}/{total}] {rel}  —  skipped (already indexed)")
                         self.progress.emit(idx, total)
                         continue
-                    # File changed — remove old data first
-                    self.log.emit(f"  [{idx:{width}}/{total}] {rel}  —  changed, re-indexing …")
+                    _emit(f"  [{idx:{width}}/{total}] {rel}  —  changed, re-indexing …")
                     db.delete_document(conn, file_id)
                     conn.commit()
                     is_update = True
                 else:
-                    self.log.emit(f"  [{idx:{width}}/{total}] {rel}  …")
+                    _emit(f"  [{idx:{width}}/{total}] {rel}  …")
                     is_update = False
 
                 try:
@@ -214,29 +243,54 @@ class _IndexWorker(QThread):
                     conn.commit()
                     if is_update:
                         upd_count += 1
-                        self.log.emit(f"    ok  {len(pages)} page(s)  [updated]")
+                        _emit(f"    ok  {len(pages)} page(s)  [updated]")
                     else:
                         new_count += 1
-                        self.log.emit(f"    ok  {len(pages)} page(s)")
+                        _emit(f"    ok  {len(pages)} page(s)")
                 except Exception as exc:
                     conn.rollback()
-                    self.log.emit(f"    ERROR: {exc}")
+                    err_count += 1
+                    _emit(f"    ERROR: {exc}")
 
                 self.progress.emit(idx, total)
 
             conn.close()
-            if self._stop_requested:
-                self.done.emit(True, "Stopped by user.")
-                return
+
             parts = []
             if new_count:
                 parts.append(f"{new_count} new")
             if upd_count:
                 parts.append(f"{upd_count} updated")
-            summary = ", ".join(parts) if parts else "no changes"
-            self.done.emit(True, f"Finished. {summary} document(s) indexed.")
+            if err_count:
+                parts.append(f"{err_count} errors")
+            if self._stop_requested:
+                summary = ("  ".join(parts) + "  stopped by user") if parts else "stopped by user"
+            else:
+                summary = ", ".join(parts) if parts else "no changes"
+            final_msg = f"Finished. {summary}."
+            _emit("")
+            _emit(final_msg)
+
+            # Write log file
+            self._write_log(now, log_lines)
+            self.done.emit(True, final_msg)
+
         except Exception:
-            self.done.emit(False, traceback.format_exc())
+            tb = traceback.format_exc()
+            log_lines.append(tb)
+            self._write_log(now, log_lines)
+            self.done.emit(False, tb)
+
+    def _write_log(self, timestamp: str, lines: list[str]):
+        try:
+            with open(self._log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*72}\n")
+                f.write(f"  {timestamp}  |  {self._db_path}\n")
+                f.write(f"{'='*72}\n")
+                for line in lines:
+                    f.write(line + "\n")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +417,7 @@ class MainWindow(QMainWindow):
         self._reindex_cb.setChecked(True)
         root.addWidget(self._reindex_cb)
 
-        # --- Start / Stop ---
+        # --- Start / Stop / Show log ---
         btn_row = QHBoxLayout()
         self._start_btn = QPushButton("Start indexing")
         self._start_btn.setFixedHeight(34)
@@ -374,6 +428,12 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._stop)
         btn_row.addWidget(self._stop_btn)
+        btn_row.addStretch()
+        self._log_btn = QPushButton("Show log file")
+        self._log_btn.setFixedHeight(34)
+        self._log_btn.setEnabled(False)
+        self._log_btn.clicked.connect(self._show_log)
+        btn_row.addWidget(self._log_btn)
         root.addLayout(btn_row)
 
         # --- Progress bar ---
@@ -453,6 +513,10 @@ class MainWindow(QMainWindow):
             self._folder_edit.setText(s["source_folder"])
         if s.get("db_path"):
             self._db_edit.setText(s["db_path"])
+            lp = _log_path(s["db_path"])
+            if lp.exists():
+                self._current_log_path = lp
+                self._log_btn.setEnabled(True)
         mf = s.get("models_folder") or str(DEFAULT_MODELS_DIR)
         self._models_folder_edit.setText(mf)
         self._last_model = s.get("model", "")
@@ -606,10 +670,12 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(True)
 
         mf = self._models_folder_edit.text().strip()
+        self._current_log_path = _log_path(db_path)
         self._worker = _IndexWorker(
             folder, db_path, model, mf,
             ["pdf", "doc", "docx", "xls", "xlsx", "txt"],
             reindex_changed=self._reindex_cb.isChecked(),
+            log_path=str(self._current_log_path),
         )
         self._worker.log.connect(self._log_line)
         self._worker.progress.connect(self._on_progress)
@@ -641,6 +707,19 @@ class MainWindow(QMainWindow):
     def _set_idle(self):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
+        lp = getattr(self, "_current_log_path", None)
+        if lp and Path(lp).exists():
+            self._log_btn.setEnabled(True)
+
+    def _show_log(self):
+        lp = getattr(self, "_current_log_path", None)
+        if lp and Path(lp).exists():
+            _open_file(Path(lp))
+        # Also check log next to the currently selected db
+        elif self._db_edit.text().strip():
+            lp = _log_path(self._db_edit.text().strip())
+            if lp.exists():
+                _open_file(lp)
 
     def _log_line(self, text: str):
         self._log.appendPlainText(text)
