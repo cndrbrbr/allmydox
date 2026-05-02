@@ -1,5 +1,72 @@
 # Changelog
 
+## v1.3 — 2026-05-02  Bugfix: folder-installed language models not found
+
+### Problem
+When a language model was downloaded via the GUI into the models folder,
+indexing failed with "Can't find model" despite the model appearing in the
+list.
+
+### Root causes
+
+**Wrong model name from meta.json** (`gui.py`)  
+`_folder_models()` read the `name` field from `meta.json`, which contains
+only the short name without the language prefix (e.g. `core_news_lg` instead
+of `de_core_news_lg`). spaCy could not find a model under the short name.  
+Fix: use the package directory name (`d.name`) which always matches the full
+model name.
+
+**Fragile `sys.path` manipulation** (`gui.py`)  
+Adding the models folder to `sys.path` is unreliable for `pip --target`
+installations because spaCy's import machinery may not resolve the package
+correctly at runtime.  
+Fix: new helper `_model_data_path()` locates the versioned model data
+subdirectory (e.g. `de_core_news_lg/de_core_news_lg-3.8.0/`) and passes
+it as a direct filesystem path to `spacy.load()`, which accepts both model
+names and explicit paths.
+
+---
+
+## v1.2 — 2026-05-02  GUI, model management, and mtime change detection
+
+### GUI front-end (`gui.py`)
+New PyQt6 window replaces the command-line-only workflow:
+- **Source folder** and **target database** pickers with Browse buttons
+- **Models folder**: configurable directory for spaCy models
+  (default `~/.allmydox_models`)
+- **Model list**: shows all models in the models folder and system-installed
+  models; click to select the model for the current indexing run
+- **Download**: installs any of 13 known spaCy models directly from GitHub
+  into the models folder via `pip --target` — no system Python changes
+- **Progress bar** and live **log** for each document
+- Settings (paths, last model) persisted to `~/.allmydox_gui.json`
+- **Re-index changed files** checkbox (default: on)
+
+### mtime-based change detection (`db.py`, `gui.py`, `main.py`)
+Documents are now tracked by modification time:
+- `documents` table gains a `mtime REAL` column; existing databases are
+  migrated automatically on open (`ALTER TABLE … ADD COLUMN`)
+- New `get_document_info()` returns `(fileID, mtime)` for each known file
+- New `delete_document()` cascades through all derived tables
+  (co-occurrences → occurrences → document row) before re-indexing
+- Per-file logic on each scan:
+  - mtime unchanged → skipped
+  - file not yet in DB → indexed
+  - mtime changed + re-index on → old data deleted, file re-indexed
+  - mtime changed + re-index off → skipped
+- Summary now reports new and updated counts separately
+
+### Setup and start scripts
+- `setup.sh` / `setup.bat`: now also install PyQt6; default model changed
+  to `de_core_news_sm`
+- `start.sh` / `start.bat`: one-click launcher for the GUI
+
+### User manual (`usermanual.md`)
+Full step-by-step guide covering installation, GUI usage, model management,
+adding documents later, CLI usage, and troubleshooting.
+
+---
+
 ## v1.1 — 2026-05-01  Performance & stability
 
 ### Problem
