@@ -2,7 +2,7 @@
 
 Scans a folder of documents and indexes every noun, proper name, and verb into a SQLite database — including the page and character position of each occurrence and co-occurrence relationships at sentence and paragraph level.
 
-Supported document formats: **PDF**, **DOCX**, **TXT**
+Supported document formats: **PDF**, **DOC**, **DOCX**, **XLS**, **XLSX**, **TXT**
 
 ---
 
@@ -21,7 +21,7 @@ Run the setup script once before first use:
 bash setup.sh
 ```
 
-This installs the Python dependencies (`spacy`, `pymupdf`, `python-docx`) and downloads the default English language model (`en_core_web_sm`).
+This installs all Python dependencies (`spacy`, `pymupdf`, `python-docx`, `openpyxl`, `xlrd`, `PyQt6`) and downloads the default German language model (`de_core_news_sm`).
 
 For a different language, pass the spaCy model name as an argument:
 
@@ -42,15 +42,17 @@ A full list of available models is at <https://spacy.io/models>.
 python3 main.py process <directory>
 ```
 
-Recursively scans `<directory>` for PDF, DOCX, and TXT files and writes results to `allmydox.db` in the current folder. Documents already in the database are skipped automatically.
+Recursively scans `<directory>` for PDF, DOC, DOCX, XLS, XLSX, and TXT files and writes results to `allmydox.db` in the current folder. Documents already in the database are skipped automatically; documents whose file has changed since the last run are re-indexed.
 
 **Options**
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--db PATH` | `allmydox.db` | Path to the SQLite database file |
-| `--ext EXT …` | `pdf docx txt` | File extensions to include |
+| `--ext EXT …` | `pdf doc docx xls xlsx txt` | File extensions to include |
 | `--model MODEL` | `en_core_web_sm` | spaCy language model to use |
+| `--reindex-changed` | on | Re-index files whose modification time changed |
+| `--no-reindex-changed` | — | Skip already-indexed files regardless of changes |
 
 **Examples**
 
@@ -293,9 +295,25 @@ ORDER BY co_occurrences DESC;
 
 ---
 
+## Supported formats
+
+| Extension | Library | Page concept |
+|---|---|---|
+| `.pdf` | pymupdf | one page per PDF page |
+| `.docx` | python-docx | page breaks detected; whole file = page 1 if none found |
+| `.doc` | LibreOffice (subprocess) | whole file = page 1; requires LibreOffice installed |
+| `.xlsx` | openpyxl | one worksheet = one page |
+| `.xls` | xlrd | one worksheet = one page |
+| `.txt` | built-in | whole file = page 1 |
+
+`.doc` files require [LibreOffice](https://www.libreoffice.org) to be installed.
+If LibreOffice is not found the file is skipped with an error message in the log.
+
+---
+
 ## Notes
 
-- **Page numbers** are 1-indexed. For TXT files the entire file counts as page 1. For DOCX files, explicit page breaks are detected where present; otherwise the whole file is page 1.
+- **Page numbers** are 1-indexed.
 - **Position** is the character offset of the word within the page text, counting from 0.
 - **Lemmatisation** is applied to nouns and verbs so that inflected forms are grouped under one entry. Names retain their original capitalisation.
-- Re-running `process` on an already-indexed folder is safe — existing documents are detected by folder path + filename and skipped.
+- Re-running `process` on an already-indexed folder is safe — unchanged files are skipped, changed files (detected by modification time) are re-indexed automatically.
