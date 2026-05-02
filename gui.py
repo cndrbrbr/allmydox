@@ -598,7 +598,8 @@ class MainWindow(QMainWindow):
 
         mf = self._models_folder_edit.text().strip()
         self._worker = _IndexWorker(
-            folder, db_path, model, mf, ["pdf", "docx", "txt"],
+            folder, db_path, model, mf,
+            ["pdf", "doc", "docx", "xls", "xlsx", "txt"],
             reindex_changed=self._reindex_cb.isChecked(),
         )
         self._worker.log.connect(self._log_line)
