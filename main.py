@@ -29,13 +29,29 @@ def cmd_process(args):
     total = len(doc_files)
     width = len(str(total))
 
-    for idx, doc_path in enumerate(doc_files, start=1):
-        rel = doc_path.relative_to(directory)
-        print(f"  [{idx:{width}}/{total}] {rel} ... ", end="", flush=True)
+    new_count = 0
+    upd_count = 0
 
-        if db.document_exists(conn, str(doc_path.parent), doc_path.name):
-            print("skipped (already indexed)")
-            continue
+    for idx, doc_path in enumerate(doc_files, start=1):
+        rel        = doc_path.relative_to(directory)
+        file_mtime = doc_path.stat().st_mtime
+        info       = db.get_document_info(conn, str(doc_path.parent), doc_path.name)
+
+        if info is not None:
+            file_id, stored_mtime = info
+            if stored_mtime is not None and stored_mtime == file_mtime:
+                print(f"  [{idx:{width}}/{total}] {rel}  —  skipped (unchanged)")
+                continue
+            if not args.reindex_changed or stored_mtime is None:
+                print(f"  [{idx:{width}}/{total}] {rel}  —  skipped (already indexed)")
+                continue
+            print(f"  [{idx:{width}}/{total}] {rel}  —  changed, re-indexing ...", flush=True)
+            db.delete_document(conn, file_id)
+            conn.commit()
+            is_update = True
+        else:
+            print(f"  [{idx:{width}}/{total}] {rel} ... ", end="", flush=True)
+            is_update = False
 
         try:
             file_id = db.insert_document(
@@ -44,17 +60,28 @@ def cmd_process(args):
                 folderpath=str(doc_path.parent),
                 size=doc_path.stat().st_size,
                 extension=doc_path.suffix.lower(),
+                mtime=file_mtime,
             )
             pages = extractor.extract(doc_path)
             processor.process_document(conn, file_id, pages, model=args.model)
             conn.commit()
-            print(f"done ({len(pages)} page(s))")
+            if is_update:
+                upd_count += 1
+                print(f"done ({len(pages)} page(s)) [updated]")
+            else:
+                new_count += 1
+                print(f"done ({len(pages)} page(s))")
         except Exception as exc:
             conn.rollback()
             print(f"ERROR: {exc}", file=sys.stderr)
 
     conn.close()
-    print("Finished.")
+    parts = []
+    if new_count:
+        parts.append(f"{new_count} new")
+    if upd_count:
+        parts.append(f"{upd_count} updated")
+    print("Finished.", ", ".join(parts) if parts else "No changes.")
 
 
 def cmd_stats(args):
@@ -86,6 +113,11 @@ def main():
                            metavar="EXT", help="Extensions to include (default: pdf docx txt)")
     p_process.add_argument("--model", default="en_core_web_sm", metavar="MODEL",
                            help="spaCy language model (default: en_core_web_sm)")
+    p_process.add_argument("--reindex-changed", action="store_true", default=True,
+                           help="Re-index files whose modification time changed (default: on)")
+    p_process.add_argument("--no-reindex-changed", dest="reindex_changed",
+                           action="store_false",
+                           help="Skip files already in the database regardless of mtime")
 
     sub.add_parser("stats", help="Show row counts for all tables")
 

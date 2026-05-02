@@ -15,7 +15,8 @@ def create_tables(conn: sqlite3.Connection):
             filename   TEXT    NOT NULL,
             folderpath TEXT    NOT NULL,
             size       INTEGER NOT NULL,
-            extension  TEXT    NOT NULL
+            extension  TEXT    NOT NULL,
+            mtime      REAL
         );
 
         CREATE TABLE IF NOT EXISTS nouns (
@@ -100,20 +101,65 @@ def create_tables(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_nvs_verb_occ   ON noun_verb_sentence(verb_occ_id);
     """)
     conn.commit()
+    # Migrate existing databases that predate the mtime column
+    try:
+        conn.execute("ALTER TABLE documents ADD COLUMN mtime REAL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+
+def get_document_info(
+    conn: sqlite3.Connection, folderpath: str, filename: str
+) -> tuple[int, float | None] | None:
+    """Return (fileID, mtime) if the document is in the database, else None."""
+    row = conn.execute(
+        "SELECT fileID, mtime FROM documents WHERE folderpath = ? AND filename = ?",
+        (folderpath, filename),
+    ).fetchone()
+    return (row[0], row[1]) if row else None
 
 
 def document_exists(conn: sqlite3.Connection, folderpath: str, filename: str) -> bool:
-    cur = conn.execute(
-        "SELECT 1 FROM documents WHERE folderpath = ? AND filename = ?",
-        (folderpath, filename),
-    )
-    return cur.fetchone() is not None
+    return get_document_info(conn, folderpath, filename) is not None
 
 
-def insert_document(conn, filename, folderpath, size, extension) -> int:
+def delete_document(conn: sqlite3.Connection, file_id: int):
+    """Delete a document and all its derived data (occurrences, co-occurrences)."""
+    # Co-occurrence tables reference occurrence IDs — delete first
+    for cooc_table in ("noun_sentence", "noun_paragraph"):
+        conn.execute(f"""
+            DELETE FROM {cooc_table} WHERE
+                (occ1_type='noun' AND occ1_id IN
+                    (SELECT nounOccurrenceID FROM noun_occurrences WHERE fileID=?))
+                OR (occ1_type='name' AND occ1_id IN
+                    (SELECT nameOccurrenceID FROM name_occurrences WHERE fileID=?))
+                OR (occ2_type='noun' AND occ2_id IN
+                    (SELECT nounOccurrenceID FROM noun_occurrences WHERE fileID=?))
+                OR (occ2_type='name' AND occ2_id IN
+                    (SELECT nameOccurrenceID FROM name_occurrences WHERE fileID=?))
+        """, (file_id, file_id, file_id, file_id))
+    conn.execute("""
+        DELETE FROM noun_verb_sentence WHERE
+            verb_occ_id IN (SELECT verbOccurrenceID FROM verb_occurrences WHERE fileID=?)
+            OR (noun_occ_type='noun' AND noun_occ_id IN
+                (SELECT nounOccurrenceID FROM noun_occurrences WHERE fileID=?))
+            OR (noun_occ_type='name' AND noun_occ_id IN
+                (SELECT nameOccurrenceID FROM name_occurrences WHERE fileID=?))
+    """, (file_id, file_id, file_id))
+    # Occurrence tables
+    conn.execute("DELETE FROM noun_occurrences WHERE fileID=?", (file_id,))
+    conn.execute("DELETE FROM name_occurrences WHERE fileID=?", (file_id,))
+    conn.execute("DELETE FROM verb_occurrences WHERE fileID=?", (file_id,))
+    # Document row itself
+    conn.execute("DELETE FROM documents WHERE fileID=?", (file_id,))
+
+
+def insert_document(conn, filename, folderpath, size, extension, mtime=None) -> int:
     cur = conn.execute(
-        "INSERT INTO documents (filename, folderpath, size, extension) VALUES (?, ?, ?, ?)",
-        (filename, folderpath, size, extension),
+        "INSERT INTO documents (filename, folderpath, size, extension, mtime)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (filename, folderpath, size, extension, mtime),
     )
     return cur.lastrowid
 

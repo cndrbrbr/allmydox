@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QPlainTextEdit,
     QComboBox, QProgressBar, QListWidget, QListWidgetItem, QSizePolicy,
-    QFrame,
+    QFrame, QCheckBox,
 )
 from PyQt6.QtGui import QTextCursor, QColor
 
@@ -116,13 +116,14 @@ class _IndexWorker(QThread):
     done     = pyqtSignal(bool, str)
 
     def __init__(self, directory: str, db_path: str, model: str,
-                 models_folder: str, exts: list[str]):
+                 models_folder: str, exts: list[str], reindex_changed: bool):
         super().__init__()
-        self._directory     = directory
-        self._db_path       = db_path
-        self._model         = model
-        self._models_folder = models_folder
-        self._exts          = exts
+        self._directory      = directory
+        self._db_path        = db_path
+        self._model          = model
+        self._models_folder  = models_folder
+        self._exts           = exts
+        self._reindex_changed = reindex_changed
 
     def run(self):
         try:
@@ -145,21 +146,39 @@ class _IndexWorker(QThread):
             db.create_tables(conn)
             processor.prime_caches(conn)
 
-            total     = len(doc_files)
-            width     = len(str(total))
-            done_count = 0
+            total      = len(doc_files)
+            width      = len(str(total))
+            new_count  = 0
+            upd_count  = 0
 
             for idx, doc_path in enumerate(doc_files, start=1):
-                rel = doc_path.relative_to(directory)
+                rel       = doc_path.relative_to(directory)
+                file_mtime = doc_path.stat().st_mtime
+                info      = db.get_document_info(conn, str(doc_path.parent), doc_path.name)
 
-                if db.document_exists(conn, str(doc_path.parent), doc_path.name):
-                    self.log.emit(
-                        f"  [{idx:{width}}/{total}] {rel}  —  skipped (already indexed)"
-                    )
-                    self.progress.emit(idx, total)
-                    continue
+                if info is not None:
+                    file_id, stored_mtime = info
+                    if stored_mtime is not None and stored_mtime == file_mtime:
+                        self.log.emit(
+                            f"  [{idx:{width}}/{total}] {rel}  —  skipped (unchanged)"
+                        )
+                        self.progress.emit(idx, total)
+                        continue
+                    if not self._reindex_changed or stored_mtime is None:
+                        self.log.emit(
+                            f"  [{idx:{width}}/{total}] {rel}  —  skipped (already indexed)"
+                        )
+                        self.progress.emit(idx, total)
+                        continue
+                    # File changed — remove old data first
+                    self.log.emit(f"  [{idx:{width}}/{total}] {rel}  —  changed, re-indexing …")
+                    db.delete_document(conn, file_id)
+                    conn.commit()
+                    is_update = True
+                else:
+                    self.log.emit(f"  [{idx:{width}}/{total}] {rel}  …")
+                    is_update = False
 
-                self.log.emit(f"  [{idx:{width}}/{total}] {rel}  …")
                 try:
                     file_id = db.insert_document(
                         conn,
@@ -167,12 +186,17 @@ class _IndexWorker(QThread):
                         folderpath=str(doc_path.parent),
                         size=doc_path.stat().st_size,
                         extension=doc_path.suffix.lower(),
+                        mtime=file_mtime,
                     )
                     pages = extractor.extract(doc_path)
                     processor.process_document(conn, file_id, pages, model=self._model)
                     conn.commit()
-                    done_count += 1
-                    self.log.emit(f"    ok  {len(pages)} page(s)")
+                    if is_update:
+                        upd_count += 1
+                        self.log.emit(f"    ok  {len(pages)} page(s)  [updated]")
+                    else:
+                        new_count += 1
+                        self.log.emit(f"    ok  {len(pages)} page(s)")
                 except Exception as exc:
                     conn.rollback()
                     self.log.emit(f"    ERROR: {exc}")
@@ -180,7 +204,13 @@ class _IndexWorker(QThread):
                 self.progress.emit(idx, total)
 
             conn.close()
-            self.done.emit(True, f"Finished. {done_count} new document(s) indexed.")
+            parts = []
+            if new_count:
+                parts.append(f"{new_count} new")
+            if upd_count:
+                parts.append(f"{upd_count} updated")
+            summary = ", ".join(parts) if parts else "no changes"
+            self.done.emit(True, f"Finished. {summary} document(s) indexed.")
         except Exception:
             self.done.emit(False, traceback.format_exc())
 
@@ -303,6 +333,11 @@ class MainWindow(QMainWindow):
         root.addLayout(dl_row)
 
         root.addWidget(self._separator())
+
+        # --- Options ---
+        self._reindex_cb = QCheckBox("Re-index changed files  (detected by modification time)")
+        self._reindex_cb.setChecked(True)
+        root.addWidget(self._reindex_cb)
 
         # --- Start / Stop ---
         btn_row = QHBoxLayout()
@@ -547,7 +582,10 @@ class MainWindow(QMainWindow):
         self._stop_btn.setEnabled(True)
 
         mf = self._models_folder_edit.text().strip()
-        self._worker = _IndexWorker(folder, db_path, model, mf, ["pdf", "docx", "txt"])
+        self._worker = _IndexWorker(
+            folder, db_path, model, mf, ["pdf", "docx", "txt"],
+            reindex_changed=self._reindex_cb.isChecked(),
+        )
         self._worker.log.connect(self._log_line)
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
