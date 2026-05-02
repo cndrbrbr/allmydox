@@ -21,7 +21,9 @@ python -m pip install --quiet ^
     "spacy>=3.7.0" ^
     "pymupdf>=1.23.0" ^
     "python-docx>=1.1.0" ^
-    "PyQt6>=6.5.0"
+    "PyQt6>=6.5.0" ^
+    "openpyxl>=3.1.0" ^
+    "xlrd>=2.0.0"
 
 echo Installing spaCy model: %SPACY_MODEL% %SPACY_VERSION% ...
 python -m pip install --quiet ^

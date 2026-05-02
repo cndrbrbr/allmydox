@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.4 — 2026-05-02  Additional file formats: DOC, XLS, XLSX
+
+Support for six file formats, up from three:
+
+| Format | Library | Notes |
+|---|---|---|
+| `.pdf` | pymupdf | unchanged |
+| `.docx` | python-docx | unchanged |
+| `.doc` | LibreOffice (subprocess) | requires LibreOffice to be installed |
+| `.xlsx` | openpyxl | each sheet = one page |
+| `.xls` | xlrd | each sheet = one page |
+| `.txt` | built-in | unchanged |
+
+**DOC extraction** (`extractor.py`)  
+LibreOffice is invoked headlessly (`--convert-to txt:Text`) to convert the
+binary .doc file to plain text in a temporary directory. `_find_soffice()`
+locates the executable on both Linux (`libreoffice`/`soffice` in PATH) and
+Windows (common Program Files locations). If LibreOffice is not installed
+the file is skipped with an informative error message.
+
+**XLSX extraction** (`extractor.py`)  
+`openpyxl` reads the workbook in read-only / data-only mode. Each worksheet
+becomes one page; rows are joined with two-space separators.
+
+**XLS extraction** (`extractor.py`)  
+`xlrd` 2.x reads the legacy binary Excel format. Same per-sheet paging as
+XLSX.
+
+New dependencies added to `requirements.txt`, `setup.sh`, `setup.bat`:
+`openpyxl>=3.1.0`, `xlrd>=2.0.0`.
+
+Default extension list updated in `gui.py` and `main.py`:
+`pdf doc docx xls xlsx txt`.
+
+---
+
 ## v1.3 — 2026-05-02  Bugfix: folder-installed language models not found
 
 ### Problem
