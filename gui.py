@@ -131,12 +131,16 @@ class _IndexWorker(QThread):
     def __init__(self, directory: str, db_path: str, model: str,
                  models_folder: str, exts: list[str], reindex_changed: bool):
         super().__init__()
-        self._directory      = directory
-        self._db_path        = db_path
-        self._model          = model
-        self._models_folder  = models_folder
-        self._exts           = exts
+        self._directory       = directory
+        self._db_path         = db_path
+        self._model           = model
+        self._models_folder   = models_folder
+        self._exts            = exts
         self._reindex_changed = reindex_changed
+        self._stop_requested  = False
+
+    def request_stop(self):
+        self._stop_requested = True
 
     def run(self):
         try:
@@ -167,6 +171,8 @@ class _IndexWorker(QThread):
             upd_count  = 0
 
             for idx, doc_path in enumerate(doc_files, start=1):
+                if self._stop_requested:
+                    break
                 rel       = doc_path.relative_to(directory)
                 file_mtime = doc_path.stat().st_mtime
                 info      = db.get_document_info(conn, str(doc_path.parent), doc_path.name)
@@ -219,6 +225,9 @@ class _IndexWorker(QThread):
                 self.progress.emit(idx, total)
 
             conn.close()
+            if self._stop_requested:
+                self.done.emit(True, "Stopped by user.")
+                return
             parts = []
             if new_count:
                 parts.append(f"{new_count} new")
@@ -609,10 +618,16 @@ class MainWindow(QMainWindow):
 
     def _stop(self):
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait()
-            self._log_line("— stopped by user —")
+            self._worker.request_stop()
+            self._worker.wait()   # waits for the current document to finish
         self._set_idle()
+
+    def closeEvent(self, event):
+        # Ensure worker finishes cleanly before the window disappears
+        if self._worker and self._worker.isRunning():
+            self._worker.request_stop()
+            self._worker.wait()
+        event.accept()
 
     def _on_progress(self, current: int, total: int):
         self._progress.setMaximum(total)
