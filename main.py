@@ -110,10 +110,10 @@ def main():
     p_process = sub.add_parser("process", help="Scan a directory and index documents")
     p_process.add_argument("directory", help="Directory to scan")
     p_process.add_argument("--ext", nargs="+",
-                           default=["pdf", "doc", "docx", "xls", "xlsx", "txt"],
+                           default=["pdf", "doc", "docx", "xls", "xlsx", "txt", "html", "htm"],
                            metavar="EXT",
                            help="Extensions to include "
-                                "(default: pdf doc docx xls xlsx txt)")
+                                "(default: pdf doc docx xls xlsx txt html htm)")
     p_process.add_argument("--model", default="en_core_web_sm", metavar="MODEL",
                            help="spaCy language model (default: en_core_web_sm)")
     p_process.add_argument("--reindex-changed", action="store_true", default=True,

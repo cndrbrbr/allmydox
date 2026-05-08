@@ -1,3 +1,4 @@
+import html.parser
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,8 @@ def extract(filepath: Path) -> list[tuple[int, str]]:
         return _extract_xls(filepath)
     elif ext == ".txt":
         return _extract_txt(filepath)
+    elif ext in (".html", ".htm"):
+        return _extract_html(filepath)
     else:
         raise ValueError(f"Unsupported file type: {ext}")
 
@@ -160,4 +163,42 @@ def _extract_xls(filepath: Path) -> list[tuple[int, str]]:
 
 def _extract_txt(filepath: Path) -> list[tuple[int, str]]:
     text = filepath.read_text(encoding="utf-8", errors="replace")
+    return [(1, text)] if text.strip() else []
+
+
+# ---------------------------------------------------------------------------
+# HTML / HTM
+# ---------------------------------------------------------------------------
+
+class _TextExtractor(html.parser.HTMLParser):
+    _SKIP_TAGS = {"script", "style", "head", "noscript", "template"}
+
+    def __init__(self):
+        super().__init__()
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._parts)
+        lines = [line.strip() for line in raw.splitlines()]
+        return "\n".join(line for line in lines if line)
+
+
+def _extract_html(filepath: Path) -> list[tuple[int, str]]:
+    raw = filepath.read_text(encoding="utf-8", errors="replace")
+    parser = _TextExtractor()
+    parser.feed(raw)
+    text = parser.get_text()
     return [(1, text)] if text.strip() else []
