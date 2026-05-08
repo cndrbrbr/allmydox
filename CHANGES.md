@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.5 — 2026-05-08  HTML/HTM support
+
+Added support for `.html` and `.htm` files. Only the visible text content
+is extracted — tags, scripts, styles, and head sections are discarded.
+
+**HTML extraction** (`extractor.py`)  
+Uses Python's built-in `html.parser` (no new dependency). A small
+`_TextExtractor` subclass skips content inside `<script>`, `<style>`,
+`<head>`, `<noscript>`, and `<template>` elements; all other character
+data is collected, blank lines stripped, and returned as a single page.
+
+Default extension list updated in `gui.py` and `main.py`:
+`pdf doc docx xls xlsx txt html htm`.
+
+---
+
 ## v1.4 — 2026-05-02  Additional file formats: DOC, XLS, XLSX
 
 Support for six file formats, up from three:

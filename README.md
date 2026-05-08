@@ -2,7 +2,7 @@
 
 Scans a folder of documents and indexes every noun, proper name, and verb into a SQLite database — including the page and character position of each occurrence and co-occurrence relationships at sentence and paragraph level.
 
-Supported document formats: **PDF**, **DOC**, **DOCX**, **XLS**, **XLSX**, **TXT**
+Supported document formats: **PDF**, **DOC**, **DOCX**, **XLS**, **XLSX**, **TXT**, **HTML**, **HTM**
 
 ---
 
@@ -42,14 +42,14 @@ A full list of available models is at <https://spacy.io/models>.
 python3 main.py process <directory>
 ```
 
-Recursively scans `<directory>` for PDF, DOC, DOCX, XLS, XLSX, and TXT files and writes results to `allmydox.db` in the current folder. Documents already in the database are skipped automatically; documents whose file has changed since the last run are re-indexed.
+Recursively scans `<directory>` for PDF, DOC, DOCX, XLS, XLSX, TXT, HTML, and HTM files and writes results to `allmydox.db` in the current folder. Documents already in the database are skipped automatically; documents whose file has changed since the last run are re-indexed.
 
 **Options**
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--db PATH` | `allmydox.db` | Path to the SQLite database file |
-| `--ext EXT …` | `pdf doc docx xls xlsx txt` | File extensions to include |
+| `--ext EXT …` | `pdf doc docx xls xlsx txt html htm` | File extensions to include |
 | `--model MODEL` | `en_core_web_sm` | spaCy language model to use |
 | `--reindex-changed` | on | Re-index files whose modification time changed |
 | `--no-reindex-changed` | — | Skip already-indexed files regardless of changes |
@@ -305,6 +305,7 @@ ORDER BY co_occurrences DESC;
 | `.xlsx` | openpyxl | one worksheet = one page |
 | `.xls` | xlrd | one worksheet = one page |
 | `.txt` | built-in | whole file = page 1 |
+| `.html` / `.htm` | built-in | visible text only, whole file = page 1 |
 
 `.doc` files require [LibreOffice](https://www.libreoffice.org) to be installed.
 If LibreOffice is not found the file is skipped with an error message in the log.
