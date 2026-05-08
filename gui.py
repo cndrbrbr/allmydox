@@ -673,7 +673,7 @@ class MainWindow(QMainWindow):
         self._current_log_path = _log_path(db_path)
         self._worker = _IndexWorker(
             folder, db_path, model, mf,
-            ["pdf", "doc", "docx", "xls", "xlsx", "txt"],
+            ["pdf", "doc", "docx", "xls", "xlsx", "txt", "html", "htm"],
             reindex_changed=self._reindex_cb.isChecked(),
             log_path=str(self._current_log_path),
         )
