@@ -1,9 +1,10 @@
 # allmydox — User Manual
 
-allmydox scans folders of documents (PDF, DOCX, TXT), extracts nouns, names,
-and verbs using NLP, and stores everything — including sentence and paragraph
-co-occurrence relationships — into a SQLite database. The database can then
-be explored visually with [findethedox](https://github.com/cndrbrbr/findethedox).
+allmydox scans folders of documents (PDF, DOC, DOCX, XLS, XLSX, TXT, HTML, HTM),
+extracts nouns, names, and verbs using NLP, and stores everything — including
+sentence and paragraph co-occurrence relationships — into a SQLite database.
+The database can then be explored visually with
+[findethedox](https://github.com/cndrbrbr/findethedox).
 
 ---
 
@@ -24,8 +25,8 @@ Open a terminal, navigate to the allmydox folder, and run:
 bash setup.sh
 ```
 
-This installs all Python dependencies (spaCy, PyQt6, pymupdf, python-docx) and
-downloads the default German spaCy model (`de_core_news_sm`).
+This installs all Python dependencies (spaCy, PyQt6, pymupdf, python-docx,
+openpyxl, xlrd) and downloads the default German spaCy model (`de_core_news_sm`).
 
 ### Windows
 
@@ -68,7 +69,14 @@ Or double-click `start.bat` in Explorer.
 
 Click **Browse…** next to *Source folder* and navigate to the folder that
 contains your documents. Subfolders are scanned automatically. Supported
-file types: **PDF**, **DOCX**, **TXT**.
+file types: **PDF**, **DOC**, **DOCX**, **XLS**, **XLSX**, **TXT**, **HTML**, **HTM**.
+
+> **Note on DOC files:** `.doc` files require [LibreOffice](https://www.libreoffice.org)
+> to be installed. If LibreOffice is not found, the file is skipped with an
+> error message in the log.
+>
+> **Note on HTML files:** only the visible text is extracted — tags, scripts,
+> and stylesheets are ignored.
 
 ### 2 — Select a target database
 
