@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.6 — 2026-05-11  Parallel processing
+
+Indexing now runs the slow NLP step on multiple CPU cores simultaneously,
+significantly reducing wall-clock time for large document sets.
+
+**Two-phase pipeline** (`processor.py`, `gui.py`)
+
+The indexing loop is split into two distinct phases:
+
+*Pass 1 — sequential:* the main thread checks every file against the database
+by modification time, exactly as before. Unchanged files are skipped; new or
+changed files are queued.
+
+*Pass 2 — parallel:* queued files are submitted to a `ProcessPoolExecutor`.
+Each worker process runs `extractor.extract()` followed by the spaCy NLP pass
+and returns a serialisable `DocumentAnalysis` dataclass containing lists of
+token tuples with local indices. The main thread collects results as they
+complete and writes them to SQLite one file at a time, preserving the
+single-writer guarantee.
+
+**New internals** (`processor.py`)
+- `DocumentAnalysis` — picklable dataclass holding occurrences and
+  co-occurrence pairs as plain lists of tuples (no database IDs)
+- `analyze_document(pages, model)` — pure NLP, zero DB access, safe in a
+  subprocess
+- `write_analysis(conn, file_id, analysis)` — resolves local indices to DB
+  row IDs and performs all inserts; runs in the main thread only
+- `_analyze_file(path_str, model)` — module-level picklable worker that calls
+  `extract()` + `analyze_document()`; designed for `ProcessPoolExecutor`
+- `process_document()` kept as a thin backward-compatible wrapper
+
+**Configurable worker count** (`gui.py`)  
+A new radio-button row in the Options section lets users choose between
+**Auto** (= `min(CPU cores, 4)`), **1**, **2**, or **4** workers. The
+selection is saved in `~/.allmydox_gui.json` and restored on next launch.
+
+**RAM guidance** (`README.md`)  
+New *Architecture* section documents the pipeline with a Mermaid flowchart and
+a RAM-per-worker table for small / medium / large spaCy models.
+
+---
+
 ## v1.5 — 2026-05-08  HTML/HTM support
 
 Added support for `.html` and `.htm` files. Only the visible text content

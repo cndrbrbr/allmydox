@@ -1,6 +1,7 @@
 """GUI front-end for allmydox — select a folder and a database, then index."""
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
 import json
 import os
@@ -15,7 +16,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QPlainTextEdit,
     QComboBox, QProgressBar, QListWidget, QListWidgetItem, QSizePolicy,
-    QFrame, QCheckBox,
+    QFrame, QCheckBox, QButtonGroup, QRadioButton,
 )
 from PyQt6.QtGui import QTextCursor, QColor
 
@@ -154,7 +155,7 @@ class _IndexWorker(QThread):
 
     def __init__(self, directory: str, db_path: str, model: str,
                  models_folder: str, exts: list[str], reindex_changed: bool,
-                 log_path: str):
+                 log_path: str, num_workers: int = 0):
         super().__init__()
         self._directory       = directory
         self._db_path         = db_path
@@ -163,6 +164,7 @@ class _IndexWorker(QThread):
         self._exts            = exts
         self._reindex_changed = reindex_changed
         self._log_path        = log_path
+        self._num_workers     = num_workers   # 0 = auto-detect
         self._stop_requested  = False
 
     def request_stop(self):
@@ -177,8 +179,6 @@ class _IndexWorker(QThread):
             log_lines.append(text)
 
         try:
-            # Resolve model: use full data path for folder-installed models,
-            # fall back to model name for system-installed ones.
             model_to_use = self._model
             if self._models_folder:
                 data_path = _model_data_path(Path(self._models_folder), self._model)
@@ -198,11 +198,14 @@ class _IndexWorker(QThread):
             db.create_tables(conn)
             processor.prime_caches(conn)
 
-            total      = len(doc_files)
-            width      = len(str(total))
-            new_count  = 0
-            upd_count  = 0
-            err_count  = 0
+            total     = len(doc_files)
+            width     = len(str(total))
+            new_count = upd_count = err_count = 0
+            completed = 0   # files whose progress slot has been emitted
+
+            # --- Pass 1: decide what to skip or process (sequential, uses DB) ---
+            # Each entry: (original_1-based_idx, doc_path, is_update)
+            to_process: list[tuple[int, Path, bool]] = []
 
             for idx, doc_path in enumerate(doc_files, start=1):
                 if self._stop_requested:
@@ -215,44 +218,74 @@ class _IndexWorker(QThread):
                     file_id, stored_mtime = info
                     if stored_mtime is not None and stored_mtime == file_mtime:
                         _emit(f"  [{idx:{width}}/{total}] {rel}  —  skipped (unchanged)")
-                        self.progress.emit(idx, total)
+                        completed += 1
+                        self.progress.emit(completed, total)
                         continue
                     if not self._reindex_changed or stored_mtime is None:
                         _emit(f"  [{idx:{width}}/{total}] {rel}  —  skipped (already indexed)")
-                        self.progress.emit(idx, total)
+                        completed += 1
+                        self.progress.emit(completed, total)
                         continue
-                    _emit(f"  [{idx:{width}}/{total}] {rel}  —  changed, re-indexing …")
                     db.delete_document(conn, file_id)
                     conn.commit()
-                    is_update = True
+                    to_process.append((idx, doc_path, True))
                 else:
-                    _emit(f"  [{idx:{width}}/{total}] {rel}  …")
-                    is_update = False
+                    to_process.append((idx, doc_path, False))
 
-                try:
-                    file_id = db.insert_document(
-                        conn,
-                        filename=doc_path.name,
-                        folderpath=str(doc_path.parent),
-                        size=doc_path.stat().st_size,
-                        extension=doc_path.suffix.lower(),
-                        mtime=file_mtime,
-                    )
-                    pages = extractor.extract(doc_path)
-                    processor.process_document(conn, file_id, pages, model=model_to_use)
-                    conn.commit()
-                    if is_update:
-                        upd_count += 1
-                        _emit(f"    ok  {len(pages)} page(s)  [updated]")
-                    else:
-                        new_count += 1
-                        _emit(f"    ok  {len(pages)} page(s)")
-                except Exception as exc:
-                    conn.rollback()
-                    err_count += 1
-                    _emit(f"    ERROR: {exc}")
+            # --- Pass 2: extract + NLP in parallel, write DB sequentially ---
+            if to_process and not self._stop_requested:
+                if self._num_workers == 0:
+                    num_workers = max(1, min(os.cpu_count() or 1, len(to_process), 4))
+                else:
+                    num_workers = max(1, min(self._num_workers, len(to_process)))
+                _emit(f"  Processing {len(to_process)} file(s) with {num_workers} worker(s) …")
 
-                self.progress.emit(idx, total)
+                with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+                    future_map: dict[concurrent.futures.Future, tuple[int, Path, bool]] = {}
+                    for orig_idx, doc_path, is_update in to_process:
+                        if self._stop_requested:
+                            break
+                        future_map[
+                            executor.submit(processor._analyze_file, str(doc_path), model_to_use)
+                        ] = (orig_idx, doc_path, is_update)
+
+                    for future in concurrent.futures.as_completed(future_map):
+                        if self._stop_requested:
+                            for f in future_map:
+                                f.cancel()
+                            break
+
+                        orig_idx, doc_path, is_update = future_map[future]
+                        rel = doc_path.relative_to(directory)
+                        label = "changed, re-indexed" if is_update else "new"
+
+                        try:
+                            analysis = future.result()
+                            file_id = db.insert_document(
+                                conn,
+                                filename=doc_path.name,
+                                folderpath=str(doc_path.parent),
+                                size=doc_path.stat().st_size,
+                                extension=doc_path.suffix.lower(),
+                                mtime=doc_path.stat().st_mtime,
+                            )
+                            processor.write_analysis(conn, file_id, analysis)
+                            conn.commit()
+                            if is_update:
+                                upd_count += 1
+                            else:
+                                new_count += 1
+                            _emit(
+                                f"  [{orig_idx:{width}}/{total}] {rel}"
+                                f"  ok  {analysis.num_pages} page(s)  [{label}]"
+                            )
+                        except Exception as exc:
+                            conn.rollback()
+                            err_count += 1
+                            _emit(f"  [{orig_idx:{width}}/{total}] {rel}  ERROR: {exc}")
+
+                        completed += 1
+                        self.progress.emit(completed, total)
 
             conn.close()
 
@@ -271,7 +304,6 @@ class _IndexWorker(QThread):
             _emit("")
             _emit(final_msg)
 
-            # Write log file
             self._write_log(now, log_lines)
             self.done.emit(True, final_msg)
 
@@ -417,6 +449,19 @@ class MainWindow(QMainWindow):
         self._reindex_cb.setChecked(True)
         root.addWidget(self._reindex_cb)
 
+        workers_row = QHBoxLayout()
+        workers_row.addWidget(QLabel("Parallel workers:"))
+        self._workers_group = QButtonGroup(self)
+        for label, value in [("Auto", 0), ("1", 1), ("2", 2), ("4", 4)]:
+            btn = QRadioButton(label)
+            btn.setProperty("worker_count", value)
+            self._workers_group.addButton(btn)
+            workers_row.addWidget(btn)
+            if value == 0:
+                btn.setChecked(True)
+        workers_row.addStretch()
+        root.addLayout(workers_row)
+
         # --- Start / Stop / Show log ---
         btn_row = QHBoxLayout()
         self._start_btn = QPushButton("Start indexing")
@@ -520,6 +565,11 @@ class MainWindow(QMainWindow):
         mf = s.get("models_folder") or str(DEFAULT_MODELS_DIR)
         self._models_folder_edit.setText(mf)
         self._last_model = s.get("model", "")
+        saved_workers = s.get("workers", 0)
+        for btn in self._workers_group.buttons():
+            if btn.property("worker_count") == saved_workers:
+                btn.setChecked(True)
+                break
 
     def _save_current_settings(self):
         _save_settings({
@@ -527,6 +577,7 @@ class MainWindow(QMainWindow):
             "db_path":        self._db_edit.text(),
             "models_folder":  self._models_folder_edit.text(),
             "model":          self._selected_model(),
+            "workers":        self._selected_workers(),
         })
 
     # ------------------------------------------------------------------
@@ -586,6 +637,10 @@ class MainWindow(QMainWindow):
         if item is None:
             return ""
         return item.data(Qt.ItemDataRole.UserRole) or ""
+
+    def _selected_workers(self) -> int:
+        btn = self._workers_group.checkedButton()
+        return btn.property("worker_count") if btn else 0
 
     # ------------------------------------------------------------------
     # Browse dialogs
@@ -676,6 +731,7 @@ class MainWindow(QMainWindow):
             ["pdf", "doc", "docx", "xls", "xlsx", "txt", "html", "htm"],
             reindex_changed=self._reindex_cb.isChecked(),
             log_path=str(self._current_log_path),
+            num_workers=self._selected_workers(),
         )
         self._worker.log.connect(self._log_line)
         self._worker.progress.connect(self._on_progress)

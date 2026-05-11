@@ -79,6 +79,63 @@ python3 main.py --db ~/myindex.db stats
 
 ---
 
+## Architecture — parallel indexing pipeline
+
+allmydox splits the indexing work into two phases so that the slow NLP step
+can run on multiple CPU cores at the same time:
+
+```mermaid
+flowchart TD
+    subgraph main["Main process · GUI thread"]
+        SCAN[Scan source folder] --> CHECK{Already in DB\nand mtime match?}
+        CHECK -- yes --> SKIP[Skip]
+        CHECK -- no  --> SUBMIT[Submit to ProcessPoolExecutor]
+        COLLECT[Receive DocumentAnalysis] --> WRITE["Write to SQLite\n(one file at a time)"]
+        WRITE --> DB[(allmydox.db)]
+    end
+
+    subgraph pool["ProcessPoolExecutor  ·  1 / 2 / 4 workers"]
+        W1["Worker 1\nextract() → spaCy NLP\n→ DocumentAnalysis"]
+        W2["Worker 2\nextract() → spaCy NLP\n→ DocumentAnalysis"]
+        WN["Worker N\nextract() → spaCy NLP\n→ DocumentAnalysis"]
+    end
+
+    SUBMIT -- "path + model" --> W1 & W2 & WN
+    W1 & W2 & WN -- result --> COLLECT
+```
+
+**Pass 1 — sequential (fast):** the main thread scans every file against the
+database. Unchanged files are skipped immediately; new or changed files are
+queued for processing.
+
+**Pass 2 — parallel:** each queued file is submitted to a
+`ProcessPoolExecutor`. Every worker process runs `extractor.extract()` to read
+the raw text and then `analyze_document()` for the spaCy NLP pass. The result
+is a serialisable `DocumentAnalysis` object containing lists of token tuples
+with local indices — no database IDs yet.
+
+**DB writes — sequential:** as each future completes the main thread calls
+`write_analysis()`, resolves local indices to database row IDs, and commits.
+SQLite (WAL mode) is written by exactly one thread, so there is no locking
+contention.
+
+### Worker count and RAM requirements
+
+Each worker loads its own copy of the spaCy model. Choose a worker count that
+fits your available RAM:
+
+| Model size | RAM per worker | 1 worker | 2 workers | 4 workers |
+|---|---|---|---|---|
+| small (`*_sm`) | ~100 MB | ~250 MB | ~350 MB | ~550 MB |
+| medium (`*_md`) | ~300 MB | ~450 MB | ~750 MB | ~1.4 GB |
+| large (`*_lg`) | ~800 MB | ~950 MB | ~1.75 GB | ~3.4 GB |
+
+Figures include the main process (~150 MB for Python + Qt). **Auto** selects
+`min(CPU cores, 4)` and is a safe default for small and medium models.
+Use 1 or 2 workers with large models unless you have 8 GB or more free RAM.
+
+---
+
 ## Database schema
 
 The database is a standard SQLite file and can be opened with any SQLite browser (e.g. [DB Browser for SQLite](https://sqlitebrowser.org/)).
