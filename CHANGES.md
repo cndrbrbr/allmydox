@@ -40,6 +40,52 @@ selection is saved in `~/.allmydox_gui.json` and restored on next launch.
 New *Architecture* section documents the pipeline with a Mermaid flowchart and
 a RAM-per-worker table for small / medium / large spaCy models.
 
+## v1.7 — 2026-05-11  Large-file sequential threshold
+
+Large scanned PDFs can load hundreds of megabytes of image data into RAM via
+PyMuPDF. Sending several such files simultaneously to the parallel pool risks
+triggering the OS out-of-memory killer, crashing a worker and turning all
+pending futures into errors.
+
+**New GUI option** (`gui.py`): *Sequential threshold* spinbox (10–500 MB,
+step 10, default 50 MB). Files at or above the threshold are routed to a
+dedicated sequential pass (Pass 3) and never enter the parallel pool. Each
+large file runs in its own fresh `ProcessPoolExecutor(max_workers=1)` with a
+300-second timeout; a crash on one file cannot affect any other file, and the
+main process is protected throughout. Log lines for large files include the
+file size and note `(sequential)`.
+
+**Four-pass pipeline** (`gui.py`)  
+The indexing loop now has four numbered passes:
+1. Scan / skip / categorise into parallel or sequential queue
+2. Parallel NLP for files below the threshold
+3. Sequential isolated NLP for files at or above the threshold
+4. Isolated retry for any files whose Pass 2 worker crashed
+
+**Documentation**  
+User manual updated with Sequential threshold description, extended log status
+table, and a new *How indexing works* section explaining all four passes.
+
+---
+
+## v1.6.2 — 2026-05-11  Bugfix: graceful recovery from worker process crashes
+
+### Problem
+If a worker process was killed during Pass 2 (e.g. by the OS OOM killer while
+loading a large PDF), `ProcessPoolExecutor` marked the entire pool as broken.
+Every file still waiting in the pool also raised `BrokenExecutor`, even though
+those files were not at fault. This caused all remaining files in the batch to
+be reported as errors.
+
+### Fix (`gui.py`)
+`BrokenExecutor` is now caught separately in the parallel loop. Files that
+received this error are collected into a retry list rather than counted as
+permanent failures. After the parallel pass, each collected file is retried
+individually in its own fresh `ProcessPoolExecutor(max_workers=1)` (Pass 4),
+so a crash on one file cannot cascade to others.
+
+---
+
 ## v1.6.1 — 2026-05-11  Bugfix: stale word-ID caches when switching databases
 
 ### Problem

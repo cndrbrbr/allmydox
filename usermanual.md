@@ -140,7 +140,7 @@ produce more accurate NLP results at the cost of speed.
 
 ### 4 — Options
 
-Two options appear below the model list:
+Three options appear below the model list:
 
 **Re-index changed files** (checkbox, on by default)  
 When ticked, a file that is already in the database is re-indexed if its
@@ -168,7 +168,18 @@ written one file at a time in the background.
   Figures include the main process (~150 MB). If your machine has less free
   RAM than shown, choose fewer workers or use a smaller model.
 
-The worker selection is saved and restored on the next launch.
+**Sequential threshold** (spinbox, default 50 MB)  
+Files at or above this size are never sent to the parallel pool. Instead they
+are processed one at a time in their own isolated worker process. This
+prevents large scanned PDFs (which can load hundreds of megabytes of image
+data into RAM) from crashing a worker and disrupting the rest of the batch.
+
+- Lower the threshold (e.g. 20 MB) if your machine has limited RAM or you
+  often see out-of-memory errors.
+- Raise it (e.g. 200 MB) if your large files are mostly text-based and you
+  want them to benefit from the parallel pool.
+
+All three settings are saved and restored on the next launch.
 
 ### 5 — Start indexing
 
@@ -180,9 +191,12 @@ appear out of numerical order — this is normal. Each line reports one of:
 |---|---|
 | `ok  N page(s)  [new]` | document indexed for the first time |
 | `ok  N page(s)  [changed, re-indexed]` | document updated since last run |
+| `ok  N page(s)  [new]  (X MB, sequential)` | large file, processed outside the parallel pool |
+| `ok  N page(s)  [new]  [retried]` | processed successfully after its first worker crashed |
 | `skipped (unchanged)` | modification time matches the database — skipped |
 | `skipped (already indexed)` | already in the database; re-index option is off |
-| `ERROR: …` | file could not be read; processing continues with other files |
+| `— worker crashed, will retry …` | worker killed (e.g. OOM); file queued for isolated retry |
+| `ERROR: …` | file could not be read or processed; indexing continues with other files |
 
 Click **Stop** at any time to abort. Documents whose analysis was already
 complete before Stop was clicked remain in the database.
@@ -196,8 +210,8 @@ Open it with findethedox:
 python3 /path/to/findethedox/main.py /path/to/your.db
 ```
 
-The GUI saves your last-used paths, model selection, and worker count and
-restores them on the next launch.
+The GUI saves your last-used paths, model selection, worker count, and
+sequential threshold and restores them on the next launch.
 
 ---
 
@@ -211,6 +225,40 @@ are indexed.
 You can also switch to a **different database** in the same session without
 restarting — just change the target database path and click Start indexing
 again. The vocabulary caches are reset automatically for each run.
+
+---
+
+## How indexing works
+
+When you click **Start indexing**, allmydox runs four passes:
+
+**Pass 1 — Scan** *(fast, sequential)*  
+Every file is checked against the database by modification time. Unchanged
+files are skipped immediately. New or changed files are sorted into two
+queues: files *smaller* than the sequential threshold go to the parallel
+queue; files *at or above* the threshold go to the sequential queue.
+
+**Pass 2 — Parallel NLP** *(concurrent)*  
+Small files are distributed across the configured number of worker processes.
+Each worker independently extracts text from its file and runs the spaCy NLP
+analysis, returning a result object. As workers finish, the main thread
+receives results and writes them to the database one file at a time. Because
+multiple workers run at once, log entries appear out of order — this is normal.
+
+**Pass 3 — Sequential NLP for large files** *(isolated, one at a time)*  
+Large files are processed here, each in its own fresh worker process with a
+5-minute timeout. Isolating each file means that if a large PDF crashes the
+worker (for example by exhausting available RAM), only that one file is logged
+as an error and the next file continues unaffected.
+
+**Pass 4 — Retry** *(isolated, one at a time)*  
+If a worker in Pass 2 was killed mid-run (e.g. by the OS out-of-memory
+killer), all files that were waiting in that pool also received an error
+through no fault of their own. Pass 4 retries those files, again one at a
+time in isolated fresh workers, so innocent files get a second chance.
+
+The database is always written by the main thread, one file at a time, so
+there is no risk of data corruption even if worker processes crash.
 
 ---
 
@@ -264,6 +312,17 @@ Each worker loads its own copy of the spaCy model into RAM. With a large
 model and 4 workers this can require 3–4 GB of free RAM. If the system
 starts swapping to disk, reduce the worker count to 1 or 2, or switch to a
 smaller model.
+
+**Many files show "worker crashed, will retry …" in the log**  
+A worker process was killed by the operating system, most likely because a
+large scanned PDF loaded too much image data into RAM (OOM). The files marked
+"will retry" are innocent bystanders — they will be retried automatically in
+Pass 4. The file that actually caused the crash will either succeed in the
+retry or be logged as an error.
+
+To prevent this in future runs, lower the *Sequential threshold* so that
+large PDFs bypass the parallel pool entirely and are processed one at a time
+in Pass 3.
 
 **Stop was clicked but the window froze briefly**  
 The worker processes are stopped after completing their current file; the
