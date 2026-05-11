@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import time
 import json
 import os
 import platform
@@ -253,12 +254,17 @@ class _IndexWorker(QThread):
 
                 with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
                     future_map: dict[concurrent.futures.Future, tuple[int, Path, bool]] = {}
-                    for orig_idx, doc_path, is_update in to_process:
+                    for i, (orig_idx, doc_path, is_update) in enumerate(to_process):
                         if self._stop_requested:
                             break
                         future_map[
                             executor.submit(processor._analyze_file, str(doc_path), model_to_use)
                         ] = (orig_idx, doc_path, is_update)
+                        # Stagger the first num_workers submissions so workers
+                        # load spaCy one at a time instead of all at once,
+                        # avoiding a simultaneous RAM spike that triggers OOM.
+                        if i < num_workers - 1:
+                            time.sleep(3)
 
                     for future in concurrent.futures.as_completed(future_map):
                         if self._stop_requested:
