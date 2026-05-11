@@ -81,43 +81,59 @@ python3 main.py --db ~/myindex.db stats
 
 ## Architecture — parallel indexing pipeline
 
-allmydox splits the indexing work into two phases so that the slow NLP step
-can run on multiple CPU cores at the same time:
+allmydox processes documents in four passes to maximise throughput while
+protecting against out-of-memory crashes from large files:
 
 ```mermaid
 flowchart TD
     subgraph main["Main process · GUI thread"]
-        SCAN[Scan source folder] --> CHECK{Already in DB\nand mtime match?}
+        SCAN[Pass 1 · Scan] --> CHECK{Already in DB\nand mtime match?}
         CHECK -- yes --> SKIP[Skip]
-        CHECK -- no  --> SUBMIT[Submit to ProcessPoolExecutor]
+        CHECK -- "no · small file" --> SUBMIT[Pass 2 · parallel pool]
+        CHECK -- "no · large file\n≥ threshold" --> SEQ
         COLLECT[Receive DocumentAnalysis] --> WRITE["Write to SQLite\n(one file at a time)"]
         WRITE --> DB[(allmydox.db)]
+        SEQ["Pass 3 · sequential\none fresh worker\nper large file"] --> WRITE
+        RETRY["Pass 4 · retry\none fresh worker\nper crash victim"] --> WRITE
     end
 
-    subgraph pool["ProcessPoolExecutor  ·  1 / 2 / 4 workers"]
+    subgraph pool["Pass 2 · ProcessPoolExecutor  ·  1 / 2 / 4 workers"]
         W1["Worker 1\nextract() → spaCy NLP\n→ DocumentAnalysis"]
         W2["Worker 2\nextract() → spaCy NLP\n→ DocumentAnalysis"]
         WN["Worker N\nextract() → spaCy NLP\n→ DocumentAnalysis"]
     end
 
     SUBMIT -- "path + model" --> W1 & W2 & WN
-    W1 & W2 & WN -- result --> COLLECT
+    W1 & W2 & WN -- "result or BrokenExecutor" --> COLLECT
+    COLLECT -- "BrokenExecutor\n(worker killed)" --> RETRY
 ```
 
-**Pass 1 — sequential (fast):** the main thread scans every file against the
-database. Unchanged files are skipped immediately; new or changed files are
-queued for processing.
+**Pass 1 — scan** *(sequential, fast):* the main thread checks every file
+against the database by modification time. Unchanged files are skipped.
+New or changed files are sorted into two queues: files below the sequential
+threshold go to the parallel queue; files at or above it go to the sequential
+queue.
 
-**Pass 2 — parallel:** each queued file is submitted to a
-`ProcessPoolExecutor`. Every worker process runs `extractor.extract()` to read
-the raw text and then `analyze_document()` for the spaCy NLP pass. The result
-is a serialisable `DocumentAnalysis` object containing lists of token tuples
-with local indices — no database IDs yet.
+**Pass 2 — parallel NLP** *(concurrent):* small files are submitted to a
+`ProcessPoolExecutor`. Each worker runs `extractor.extract()` then
+`analyze_document()` and returns a serialisable `DocumentAnalysis` — lists of
+token tuples with local indices, no database IDs. The main thread writes each
+result to SQLite as futures complete. If a worker is killed by the OS
+(e.g. OOM on a large PDF), `BrokenExecutor` is caught per-future; affected
+files are queued for Pass 4 rather than counted as permanent errors.
 
-**DB writes — sequential:** as each future completes the main thread calls
-`write_analysis()`, resolves local indices to database row IDs, and commits.
-SQLite (WAL mode) is written by exactly one thread, so there is no locking
-contention.
+**Pass 3 — sequential NLP for large files** *(isolated):* each large file runs
+in its own fresh `ProcessPoolExecutor(max_workers=1)` with a 300-second
+timeout. A crash on one file cannot affect any other.
+
+**Pass 4 — retry** *(isolated):* files that received `BrokenExecutor` in Pass 2
+are retried here, again one per fresh pool. Files that were innocent bystanders
+of a crashed pool get a second chance; the file that caused the crash will
+either succeed or be logged as a final error.
+
+**DB writes** are always performed by the main thread, one file at a time.
+SQLite WAL mode ensures no locking contention and no data corruption even when
+worker processes crash.
 
 ### Worker count and RAM requirements
 
@@ -133,6 +149,13 @@ fits your available RAM:
 Figures include the main process (~150 MB for Python + Qt). **Auto** selects
 `min(CPU cores, 4)` and is a safe default for small and medium models.
 Use 1 or 2 workers with large models unless you have 8 GB or more free RAM.
+
+### Sequential threshold
+
+The default threshold is **50 MB**. Files at or above this size bypass the
+parallel pool entirely (Pass 3) so that large scanned PDFs cannot crash
+workers shared with other files. Lower the threshold on RAM-constrained
+machines; raise it if your large files are mostly text-based.
 
 ---
 
