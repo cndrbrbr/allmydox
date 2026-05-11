@@ -22,7 +22,10 @@ def get_nlp(model: str) -> spacy.language.Language:
 
 
 def prime_caches(conn: sqlite3.Connection):
-    """Load all existing vocabulary into the in-memory caches."""
+    """Clear and reload all word→ID caches from the given DB connection."""
+    _noun_ids.clear()
+    _name_ids.clear()
+    _verb_ids.clear()
     _noun_ids.update(conn.execute("SELECT noun, nounID FROM nouns").fetchall())
     _name_ids.update(conn.execute("SELECT name, nameID FROM names").fetchall())
     _verb_ids.update(conn.execute("SELECT verb, verbID FROM verbs").fetchall())
