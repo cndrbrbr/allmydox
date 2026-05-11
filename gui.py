@@ -233,6 +233,9 @@ class _IndexWorker(QThread):
                     to_process.append((idx, doc_path, False))
 
             # --- Pass 2: extract + NLP in parallel, write DB sequentially ---
+            # Files whose worker process crashed are collected for isolated retry.
+            broken_files: list[tuple[int, Path, bool]] = []
+
             if to_process and not self._stop_requested:
                 if self._num_workers == 0:
                     num_workers = max(1, min(os.cpu_count() or 1, len(to_process), 4))
@@ -279,6 +282,14 @@ class _IndexWorker(QThread):
                                 f"  [{orig_idx:{width}}/{total}] {rel}"
                                 f"  ok  {analysis.num_pages} page(s)  [{label}]"
                             )
+                        except concurrent.futures.BrokenExecutor:
+                            # A worker process crashed (OOM / segfault in a C
+                            # library). The pool is now dead; all pending futures
+                            # also raise BrokenExecutor. Queue this file for a
+                            # clean isolated retry instead of reporting it as a
+                            # permanent error.
+                            broken_files.append((orig_idx, doc_path, is_update))
+                            _emit(f"  [{orig_idx:{width}}/{total}] {rel}  — worker crashed, will retry …")
                         except Exception as exc:
                             conn.rollback()
                             err_count += 1
@@ -286,6 +297,44 @@ class _IndexWorker(QThread):
 
                         completed += 1
                         self.progress.emit(completed, total)
+
+            # --- Pass 3: retry crash victims, one file per fresh pool ---
+            # Each file gets its own ProcessPoolExecutor so that a second crash
+            # on the bad file cannot break the retry run for the other files.
+            if broken_files and not self._stop_requested:
+                _emit(f"  Retrying {len(broken_files)} file(s) in isolated workers …")
+                for orig_idx, doc_path, is_update in broken_files:
+                    if self._stop_requested:
+                        break
+                    rel = doc_path.relative_to(directory)
+                    label = "changed, re-indexed" if is_update else "new"
+                    try:
+                        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as ex:
+                            analysis = ex.submit(
+                                processor._analyze_file, str(doc_path), model_to_use
+                            ).result(timeout=300)
+                        file_id = db.insert_document(
+                            conn,
+                            filename=doc_path.name,
+                            folderpath=str(doc_path.parent),
+                            size=doc_path.stat().st_size,
+                            extension=doc_path.suffix.lower(),
+                            mtime=doc_path.stat().st_mtime,
+                        )
+                        processor.write_analysis(conn, file_id, analysis)
+                        conn.commit()
+                        if is_update:
+                            upd_count += 1
+                        else:
+                            new_count += 1
+                        _emit(
+                            f"  [{orig_idx:{width}}/{total}] {rel}"
+                            f"  ok  {analysis.num_pages} page(s)  [{label}]  [retried]"
+                        )
+                    except Exception as exc:
+                        conn.rollback()
+                        err_count += 1
+                        _emit(f"  [{orig_idx:{width}}/{total}] {rel}  ERROR: {exc}")
 
             conn.close()
 
