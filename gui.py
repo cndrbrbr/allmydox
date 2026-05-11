@@ -353,6 +353,13 @@ class _IndexWorker(QThread):
             # Each file gets its own ProcessPoolExecutor so that a second crash
             # on the bad file cannot break the retry run for the other files.
             if broken_files and not self._stop_requested:
+                if len(broken_files) == len(to_process) and num_workers > 1:
+                    _emit(
+                        f"  WARNING: the entire parallel pool crashed"
+                        f" ({len(broken_files)}/{len(to_process)} files affected)."
+                        f" All files will be retried sequentially."
+                        f" Consider reducing workers to 1 or 2 to avoid this."
+                    )
                 _emit(f"  Retrying {len(broken_files)} file(s) in isolated workers …")
                 for orig_idx, doc_path, is_update in broken_files:
                     if self._stop_requested:
