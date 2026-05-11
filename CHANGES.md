@@ -40,6 +40,31 @@ selection is saved in `~/.allmydox_gui.json` and restored on next launch.
 New *Architecture* section documents the pipeline with a Mermaid flowchart and
 a RAM-per-worker table for small / medium / large spaCy models.
 
+## v1.6.1 — 2026-05-11  Bugfix: stale word-ID caches when switching databases
+
+### Problem
+If two indexing runs were performed in the same GUI session against
+**different database files**, the word→ID caches (`_noun_ids`, `_name_ids`,
+`_verb_ids`) retained entries from the first database. When the second run
+began, `prime_caches()` added the new database's vocabulary on top of the
+old entries without clearing them first. Any word that had been assigned an
+ID in the first database but did not yet exist in the second would be looked
+up from the stale cache and its old ID used directly — pointing to a row that
+did not exist in the second database — causing a `FOREIGN KEY constraint
+failed` error in `noun_occurrences`, `name_occurrences`, or
+`verb_occurrences`.
+
+### Fix (`processor.py`)
+`prime_caches()` now calls `.clear()` on all three dicts before reloading
+from the connection, so IDs from a previous database can never bleed into a
+new session.
+
+### Test (`_test_parallel.py`)
+New end-to-end test suite covering: `analyze_document()`, `write_analysis()`
+FK integrity, `_analyze_file()` worker function, `ProcessPoolExecutor` with
+2 workers / 6 files, idempotency (mtime-based skip), and rollback isolation
+on a corrupt file.
+
 ---
 
 ## v1.5 — 2026-05-08  HTML/HTM support
