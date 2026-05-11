@@ -203,9 +203,14 @@ restores them on the next launch.
 
 ## Adding more documents later
 
-Start the GUI again, select the same (or a different) source folder, and
-select the **same database file**. Documents already in the database are
-detected by folder path + filename and skipped. Only new files are indexed.
+Start the GUI (or keep it open), select the same (or a different) source
+folder, and select the **same database file**. Documents already in the
+database are detected by folder path + filename and skipped. Only new files
+are indexed.
+
+You can also switch to a **different database** in the same session without
+restarting — just change the target database path and click Start indexing
+again. The vocabulary caches are reset automatically for each run.
 
 ---
 
@@ -246,6 +251,13 @@ only; scanned pages without a text layer are skipped.
 **The database grows very large**  
 Large document collections produce large co-occurrence tables. A collection
 of ~6,000 documents produces a database of roughly 2–3 GB, which is normal.
+
+**"FOREIGN KEY constraint failed" errors in the log**  
+This could happen in v1.6 when indexing a second database in the same GUI
+session — the vocabulary caches retained IDs from the first database. Fixed
+in v1.6.1: the caches are now cleared at the start of every indexing run.
+If you see this error on a current version, try clicking Start indexing again;
+if it persists, please report it as a bug.
 
 **Processing seems slower with more workers / system becomes unresponsive**  
 Each worker loads its own copy of the spaCy model into RAM. With a large
