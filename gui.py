@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QPlainTextEdit,
     QComboBox, QProgressBar, QListWidget, QListWidgetItem, QSizePolicy,
-    QFrame, QCheckBox, QButtonGroup, QRadioButton,
+    QFrame, QCheckBox, QButtonGroup, QRadioButton, QSpinBox,
 )
 from PyQt6.QtGui import QTextCursor, QColor
 
@@ -155,7 +155,7 @@ class _IndexWorker(QThread):
 
     def __init__(self, directory: str, db_path: str, model: str,
                  models_folder: str, exts: list[str], reindex_changed: bool,
-                 log_path: str, num_workers: int = 0):
+                 log_path: str, num_workers: int = 0, large_file_mb: int = 50):
         super().__init__()
         self._directory       = directory
         self._db_path         = db_path
@@ -165,6 +165,7 @@ class _IndexWorker(QThread):
         self._reindex_changed = reindex_changed
         self._log_path        = log_path
         self._num_workers     = num_workers   # 0 = auto-detect
+        self._large_file_mb   = large_file_mb
         self._stop_requested  = False
 
     def request_stop(self):
@@ -204,8 +205,10 @@ class _IndexWorker(QThread):
             completed = 0   # files whose progress slot has been emitted
 
             # --- Pass 1: decide what to skip or process (sequential, uses DB) ---
-            # Each entry: (original_1-based_idx, doc_path, is_update)
-            to_process: list[tuple[int, Path, bool]] = []
+            # Small files → parallel pool; large files → sequential isolated pool.
+            to_process:     list[tuple[int, Path, bool]] = []
+            to_process_seq: list[tuple[int, Path, bool]] = []
+            threshold_bytes = self._large_file_mb * 1024 * 1024
 
             for idx, doc_path in enumerate(doc_files, start=1):
                 if self._stop_requested:
@@ -228,9 +231,14 @@ class _IndexWorker(QThread):
                         continue
                     db.delete_document(conn, file_id)
                     conn.commit()
-                    to_process.append((idx, doc_path, True))
+                    is_update = True
                 else:
-                    to_process.append((idx, doc_path, False))
+                    is_update = False
+
+                if doc_path.stat().st_size >= threshold_bytes:
+                    to_process_seq.append((idx, doc_path, is_update))
+                else:
+                    to_process.append((idx, doc_path, is_update))
 
             # --- Pass 2: extract + NLP in parallel, write DB sequentially ---
             # Files whose worker process crashed are collected for isolated retry.
@@ -298,7 +306,50 @@ class _IndexWorker(QThread):
                         completed += 1
                         self.progress.emit(completed, total)
 
-            # --- Pass 3: retry crash victims, one file per fresh pool ---
+            # --- Pass 3: large files — sequential, one fresh pool per file ---
+            if to_process_seq and not self._stop_requested:
+                _emit(
+                    f"  Processing {len(to_process_seq)} large file(s)"
+                    f" (≥ {self._large_file_mb} MB) sequentially …"
+                )
+                for orig_idx, doc_path, is_update in to_process_seq:
+                    if self._stop_requested:
+                        break
+                    rel = doc_path.relative_to(directory)
+                    label = "changed, re-indexed" if is_update else "new"
+                    size_mb = doc_path.stat().st_size / (1024 * 1024)
+                    try:
+                        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as ex:
+                            analysis = ex.submit(
+                                processor._analyze_file, str(doc_path), model_to_use
+                            ).result(timeout=300)
+                        file_id = db.insert_document(
+                            conn,
+                            filename=doc_path.name,
+                            folderpath=str(doc_path.parent),
+                            size=doc_path.stat().st_size,
+                            extension=doc_path.suffix.lower(),
+                            mtime=doc_path.stat().st_mtime,
+                        )
+                        processor.write_analysis(conn, file_id, analysis)
+                        conn.commit()
+                        if is_update:
+                            upd_count += 1
+                        else:
+                            new_count += 1
+                        _emit(
+                            f"  [{orig_idx:{width}}/{total}] {rel}"
+                            f"  ok  {analysis.num_pages} page(s)  [{label}]"
+                            f"  ({size_mb:.0f} MB, sequential)"
+                        )
+                    except Exception as exc:
+                        conn.rollback()
+                        err_count += 1
+                        _emit(f"  [{orig_idx:{width}}/{total}] {rel}  ERROR: {exc}")
+                    completed += 1
+                    self.progress.emit(completed, total)
+
+            # --- Pass 4: retry crash victims, one file per fresh pool ---
             # Each file gets its own ProcessPoolExecutor so that a second crash
             # on the bad file cannot break the retry run for the other files.
             if broken_files and not self._stop_requested:
@@ -511,6 +562,19 @@ class MainWindow(QMainWindow):
         workers_row.addStretch()
         root.addLayout(workers_row)
 
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(QLabel("Sequential threshold:"))
+        self._threshold_spin = QSpinBox()
+        self._threshold_spin.setRange(10, 500)
+        self._threshold_spin.setSingleStep(10)
+        self._threshold_spin.setValue(50)
+        self._threshold_spin.setSuffix(" MB")
+        self._threshold_spin.setFixedWidth(90)
+        threshold_row.addWidget(self._threshold_spin)
+        threshold_row.addWidget(QLabel("(files larger than this are not sent to the parallel pool)"))
+        threshold_row.addStretch()
+        root.addLayout(threshold_row)
+
         # --- Start / Stop / Show log ---
         btn_row = QHBoxLayout()
         self._start_btn = QPushButton("Start indexing")
@@ -619,6 +683,7 @@ class MainWindow(QMainWindow):
             if btn.property("worker_count") == saved_workers:
                 btn.setChecked(True)
                 break
+        self._threshold_spin.setValue(s.get("large_file_mb", 50))
 
     def _save_current_settings(self):
         _save_settings({
@@ -627,6 +692,7 @@ class MainWindow(QMainWindow):
             "models_folder":  self._models_folder_edit.text(),
             "model":          self._selected_model(),
             "workers":        self._selected_workers(),
+            "large_file_mb":  self._selected_threshold(),
         })
 
     # ------------------------------------------------------------------
@@ -690,6 +756,9 @@ class MainWindow(QMainWindow):
     def _selected_workers(self) -> int:
         btn = self._workers_group.checkedButton()
         return btn.property("worker_count") if btn else 0
+
+    def _selected_threshold(self) -> int:
+        return self._threshold_spin.value()
 
     # ------------------------------------------------------------------
     # Browse dialogs
@@ -781,6 +850,7 @@ class MainWindow(QMainWindow):
             reindex_changed=self._reindex_cb.isChecked(),
             log_path=str(self._current_log_path),
             num_workers=self._selected_workers(),
+            large_file_mb=self._selected_threshold(),
         )
         self._worker.log.connect(self._log_line)
         self._worker.progress.connect(self._on_progress)
