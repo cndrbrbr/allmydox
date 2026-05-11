@@ -138,31 +138,66 @@ Available models:
 *Small* models are faster and use less memory. *Medium* and *large* models
 produce more accurate NLP results at the cost of speed.
 
-### 4 — Start indexing
+### 4 — Options
 
-Click **Start indexing**. The progress bar and log show which document is
-being processed. Each line reports one of:
+Two options appear below the model list:
+
+**Re-index changed files** (checkbox, on by default)  
+When ticked, a file that is already in the database is re-indexed if its
+modification time has changed since the last run. Untick this if you want
+to index only brand-new files and leave existing entries untouched even when
+the source files have changed.
+
+**Parallel workers** (radio buttons: Auto / 1 / 2 / 4)  
+Controls how many CPU cores are used for the slow NLP step. Each worker
+process analyses a different document simultaneously; the database is still
+written one file at a time in the background.
+
+- **Auto** — uses up to 4 workers, limited by the number of available CPU
+  cores. Best choice for most systems with small or medium models.
+- **1** — sequential processing, lowest memory use. Recommended when RAM
+  is limited or when using a large model on a modest machine.
+- **2 / 4** — fixed worker count. Choose based on your available RAM:
+
+  | Model size | RAM per worker | 2 workers | 4 workers |
+  |---|---|---|---|
+  | small (`*_sm`) | ~100 MB | ~350 MB | ~550 MB |
+  | medium (`*_md`) | ~300 MB | ~750 MB | ~1.4 GB |
+  | large (`*_lg`) | ~800 MB | ~1.75 GB | ~3.4 GB |
+
+  Figures include the main process (~150 MB). If your machine has less free
+  RAM than shown, choose fewer workers or use a smaller model.
+
+The worker selection is saved and restored on the next launch.
+
+### 5 — Start indexing
+
+Click **Start indexing**. The progress bar and log show which documents are
+being processed. Because multiple workers run in parallel, log lines may
+appear out of numerical order — this is normal. Each line reports one of:
 
 | Status | Meaning |
 |---|---|
-| `ok  N page(s)` | document indexed successfully |
-| `skipped (already indexed)` | document was already in the database |
-| `ERROR: …` | file could not be read; processing continues |
+| `ok  N page(s)  [new]` | document indexed for the first time |
+| `ok  N page(s)  [changed, re-indexed]` | document updated since last run |
+| `skipped (unchanged)` | modification time matches the database — skipped |
+| `skipped (already indexed)` | already in the database; re-index option is off |
+| `ERROR: …` | file could not be read; processing continues with other files |
 
-Click **Stop** at any time to abort. Documents fully processed before Stop
-was clicked remain in the database.
+Click **Stop** at any time to abort. Documents whose analysis was already
+complete before Stop was clicked remain in the database.
 
-### 5 — Done
+### 6 — Done
 
-When the log shows *Finished. N new document(s) indexed.* the database is
-ready. Open it with findethedox:
+When the log shows *Finished. N new, M updated.* the database is ready.
+Open it with findethedox:
 
 ```bash
 python3 /path/to/findethedox/main.py /path/to/your.db
 ```
 
-The GUI saves your last-used paths and model selection and restores them on
-the next launch.
+The GUI saves your last-used paths, model selection, and worker count and
+restores them on the next launch.
 
 ---
 
@@ -212,6 +247,13 @@ only; scanned pages without a text layer are skipped.
 Large document collections produce large co-occurrence tables. A collection
 of ~6,000 documents produces a database of roughly 2–3 GB, which is normal.
 
+**Processing seems slower with more workers / system becomes unresponsive**  
+Each worker loads its own copy of the spaCy model into RAM. With a large
+model and 4 workers this can require 3–4 GB of free RAM. If the system
+starts swapping to disk, reduce the worker count to 1 or 2, or switch to a
+smaller model.
+
 **Stop was clicked but the window froze briefly**  
-The worker thread is stopped; the brief freeze is Python waiting for the
-current document to finish before exiting cleanly.
+The worker processes are stopped after completing their current file; the
+brief freeze is Python waiting for them to exit cleanly before the GUI
+returns to idle.
