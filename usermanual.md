@@ -192,6 +192,8 @@ appear out of numerical order — this is normal. Each line reports one of:
 | `ok  N page(s)  [new]` | document indexed for the first time |
 | `ok  N page(s)  [changed, re-indexed]` | document updated since last run |
 | `ok  N page(s)  [new]  (X MB, sequential)` | large file, processed outside the parallel pool |
+| `— N characters, will be processed in M sections …` | very long text (over 1 million characters), queued for Pass 5 |
+| `ok  N page(s)  [new]  (N characters, M sections)` | very long text, processed section by section |
 | `ok  N page(s)  [new]  [retried]` | processed successfully after its first worker crashed |
 | `skipped (unchanged)` | modification time matches the database — skipped |
 | `skipped (already indexed)` | already in the database; re-index option is off |
@@ -228,9 +230,24 @@ again. The vocabulary caches are reset automatically for each run.
 
 ---
 
+## Numbers and codes
+
+Since v1.8 allmydox also stores numbers and codes — file numbers, order
+numbers, dates, times, error codes, IP addresses, version numbers, amounts
+(e.g. `0600997`, `M393`, `ERR-0042`, `2024-08-23`, `192.168.0.1`) — and which
+nouns, names and other codes they appear with in a sentence or paragraph.
+This makes protocol and log data searchable in findethedox.
+
+Databases created with an older version contain no codes. New files indexed
+into such a database do get codes, but the files already in it do not. To
+make all documents searchable by code, **index the folder again into a new
+database file**.
+
+---
+
 ## How indexing works
 
-When you click **Start indexing**, allmydox runs four passes:
+When you click **Start indexing**, allmydox runs up to five passes:
 
 **Pass 1 — Scan** *(fast, sequential)*  
 Every file is checked against the database by modification time. Unchanged
@@ -256,6 +273,18 @@ If a worker in Pass 2 was killed mid-run (e.g. by the OS out-of-memory
 killer), all files that were waiting in that pool also received an error
 through no fault of their own. Pass 4 retries those files, again one at a
 time in isolated fresh workers, so innocent files get a second chance.
+
+**Pass 5 — Very long texts in sections** *(sections in parallel)*  
+Documents with more than 1 million characters of text — typically
+spreadsheets with hundreds of thousands of rows, or long logs — are not
+analysed in one piece. In Passes 2–4 they are only extracted; here the text
+is split into sections of about 1 million characters (at paragraph or line
+boundaries), the sections are analysed by the workers in parallel, and each
+result is written to the database as soon as it is ready. Memory use
+therefore does not grow with the size of the document. The document is
+committed once all its sections are written; if one section fails, the whole
+document is rolled back and logged as an error. Progress is shown as
+`section i/n` in the log window.
 
 The database is always written by the main thread, one file at a time, so
 there is no risk of data corruption even if worker processes crash.

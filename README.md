@@ -305,7 +305,37 @@ Every noun/name + verb triple that appears in the **same sentence**.
 | `noun_occ_id` | INTEGER | Row in `noun_occurrences` or `name_occurrences` |
 | `verb_occ_id` | INTEGER FK | Row in `verb_occurrences` |
 
+
+### `codes` / `code_occurrences`
+Numbers and codes: every run of letters/digits joined by `. _ : / - +` (or `,` between digits)
+that contains a digit and is 2–64 characters long — e.g. `0600997`, `M393`,
+`ERR-0042`, `2024-08-23`, `10:15:02`, `192.168.0.1`, `v2.3.1`, `1.234,56`,
+`RE-2024/117` — plus upper-case abbreviations of 2–10 letters that spaCy does
+not tag as noun, name or verb (e.g. `ERR`, `OK`). Codes are found with a
+regular expression on the sentence text, so a date or IP address stays one
+code however spaCy tokenises it. Stored as written (`code TEXT UNIQUE`);
+`code_occurrences` has the same columns as `noun_occurrences`.
+
+A value containing spaces (e.g. an IBAN written in groups) is stored as
+several codes.
+
+### `code_sentence` / `code_paragraph`
+A code occurrence paired with a noun, name or another code in the **same
+sentence** / **same paragraph** (the paragraph table also contains the
+same-sentence pairs, like `noun_paragraph`). Code–code pairs are stored once,
+with the earlier code in `code_occ_id`. A context is only paired if it holds
+at most 15 nouns, names and codes together (`MAX_ENTITIES_PER_CONTEXT`); the
+occurrences themselves are always stored.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `codesentenceID` / `codeparagraphID` | INTEGER PK | |
+| `code_occ_id` | INTEGER FK | Row in `code_occurrences` |
+| `occ_type` | TEXT | `noun`, `name` or `code` |
+| `occ_id` | INTEGER | Row in `noun_occurrences`, `name_occurrences` or `code_occurrences` |
+
 ---
+
 
 ## Example queries
 
