@@ -244,6 +244,19 @@ class _IndexWorker(QThread):
             # --- Pass 2: extract + NLP in parallel, write DB sequentially ---
             # Files whose worker process crashed are collected for isolated retry.
             broken_files: list[tuple[int, Path, bool]] = []
+            # Files with more than processor._SECTION_CHARS of text, processed last
+            large_docs: list[tuple[int, Path, bool, processor.LargeDocument]] = []
+
+            def _defer_large(orig_idx, doc_path, is_update, analysis) -> bool:
+                if not isinstance(analysis, processor.LargeDocument):
+                    return False
+                large_docs.append((orig_idx, doc_path, is_update, analysis))
+                _emit(
+                    f"  [{orig_idx:{width}}/{total}] {doc_path.relative_to(directory)}"
+                    f"  —  {analysis.num_chars:,} characters,"
+                    f" will be processed in {len(analysis.sections)} sections …"
+                )
+                return True
 
             if to_process and not self._stop_requested:
                 if self._num_workers == 0:
@@ -278,6 +291,8 @@ class _IndexWorker(QThread):
 
                         try:
                             analysis = future.result()
+                            if _defer_large(orig_idx, doc_path, is_update, analysis):
+                                continue
                             file_id = db.insert_document(
                                 conn,
                                 filename=doc_path.name,
@@ -329,6 +344,8 @@ class _IndexWorker(QThread):
                             analysis = ex.submit(
                                 processor._analyze_file, str(doc_path), model_to_use
                             ).result(timeout=300)
+                        if _defer_large(orig_idx, doc_path, is_update, analysis):
+                            continue
                         file_id = db.insert_document(
                             conn,
                             filename=doc_path.name,
@@ -377,6 +394,8 @@ class _IndexWorker(QThread):
                             analysis = ex.submit(
                                 processor._analyze_file, str(doc_path), model_to_use
                             ).result(timeout=300)
+                        if _defer_large(orig_idx, doc_path, is_update, analysis):
+                            continue
                         file_id = db.insert_document(
                             conn,
                             filename=doc_path.name,
@@ -399,6 +418,55 @@ class _IndexWorker(QThread):
                         conn.rollback()
                         err_count += 1
                         _emit(f"  [{orig_idx:{width}}/{total}] {rel}  ERROR: {exc}")
+
+            # --- Pass 5: large texts — section by section, sections in parallel ---
+            if large_docs and not self._stop_requested:
+                if self._num_workers == 0:
+                    sec_workers = max(1, min(os.cpu_count() or 1, 4))
+                else:
+                    sec_workers = max(1, self._num_workers)
+                _emit(
+                    f"  Processing {len(large_docs)} large text(s) in sections"
+                    f" with {sec_workers} worker(s) …"
+                )
+                for orig_idx, doc_path, is_update, large in large_docs:
+                    if self._stop_requested:
+                        break
+                    rel = doc_path.relative_to(directory)
+                    label = "changed, re-indexed" if is_update else "new"
+                    n = len(large.sections)
+                    try:
+                        file_id = db.insert_document(
+                            conn,
+                            filename=doc_path.name,
+                            folderpath=str(doc_path.parent),
+                            size=doc_path.stat().st_size,
+                            extension=doc_path.suffix.lower(),
+                            mtime=doc_path.stat().st_mtime,
+                        )
+                        for i, analysis in enumerate(processor.analyze_sections(
+                                large.sections, model_to_use, sec_workers, timeout=900), 1):
+                            if self._stop_requested:
+                                raise RuntimeError("stopped by user")
+                            processor.write_analysis(conn, file_id, analysis)
+                            self.log.emit(f"      {rel}  section {i}/{n}")
+                        conn.commit()
+                        if is_update:
+                            upd_count += 1
+                        else:
+                            new_count += 1
+                        _emit(
+                            f"  [{orig_idx:{width}}/{total}] {rel}"
+                            f"  ok  {large.num_pages} page(s)  [{label}]"
+                            f"  ({large.num_chars:,} characters, {n} sections)"
+                        )
+                    except Exception as exc:
+                        conn.rollback()
+                        err_count += 1
+                        _emit(f"  [{orig_idx:{width}}/{total}] {rel}  ERROR: {exc}")
+                    large.sections = []   # free the text
+                    completed += 1
+                    self.progress.emit(completed, total)
 
             conn.close()
 

@@ -1,6 +1,8 @@
 """
-Live test of the 4-pass pipeline against the real folder.
+Live test of the 4-pass pipeline against a real folder.
 Uses a temporary database — no permanent changes.
+
+Usage: python _test_real.py /path/to/documents
 """
 import concurrent.futures
 import os
@@ -12,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 import db
 import processor
 
-DIRECTORY    = Path("/path/to/documents")
+if len(sys.argv) != 2:
+    sys.exit("Usage: python _test_real.py /path/to/documents")
+DIRECTORY    = Path(sys.argv[1])
 MODEL        = "de_core_news_sm"
 EXTENSIONS   = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".html", ".htm"]
 LARGE_FILE_MB = 50

@@ -85,6 +85,39 @@ def create_tables(conn: sqlite3.Connection):
             verb_occ_id        INTEGER NOT NULL REFERENCES verb_occurrences(verbOccurrenceID)
         );
 
+        -- Numbers and codes: tokens with digits (0600997, M393, ERR-0042,
+        -- 2024-08-23, 10.0.0.1, v2.3.1) and upper-case abbreviations that are
+        -- not nouns/names/verbs.  Stored as written.
+        CREATE TABLE IF NOT EXISTS codes (
+            codeID INTEGER PRIMARY KEY AUTOINCREMENT,
+            code   TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS code_occurrences (
+            codeOccurrenceID INTEGER PRIMARY KEY AUTOINCREMENT,
+            fileID           INTEGER NOT NULL REFERENCES documents(fileID),
+            codeID           INTEGER NOT NULL REFERENCES codes(codeID),
+            pagenumber       INTEGER NOT NULL,
+            position         INTEGER NOT NULL
+        );
+
+        -- A code co-occurring with a noun, name or another code in the same
+        -- sentence / paragraph.  Code–code pairs are stored once, with the
+        -- earlier code in code_occ_id.
+        CREATE TABLE IF NOT EXISTS code_sentence (
+            codesentenceID INTEGER PRIMARY KEY AUTOINCREMENT,
+            code_occ_id    INTEGER NOT NULL REFERENCES code_occurrences(codeOccurrenceID),
+            occ_type       TEXT    NOT NULL CHECK (occ_type IN ('noun', 'name', 'code')),
+            occ_id         INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS code_paragraph (
+            codeparagraphID INTEGER PRIMARY KEY AUTOINCREMENT,
+            code_occ_id     INTEGER NOT NULL REFERENCES code_occurrences(codeOccurrenceID),
+            occ_type        TEXT    NOT NULL CHECK (occ_type IN ('noun', 'name', 'code')),
+            occ_id          INTEGER NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_noun_occ_file ON noun_occurrences(fileID);
         CREATE INDEX IF NOT EXISTS idx_name_occ_file ON name_occurrences(fileID);
         CREATE INDEX IF NOT EXISTS idx_verb_occ_file ON verb_occurrences(fileID);
@@ -99,6 +132,13 @@ def create_tables(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_noun_para_occ2 ON noun_paragraph(occ2_type, occ2_id);
         CREATE INDEX IF NOT EXISTS idx_nvs_noun_occ   ON noun_verb_sentence(noun_occ_type, noun_occ_id);
         CREATE INDEX IF NOT EXISTS idx_nvs_verb_occ   ON noun_verb_sentence(verb_occ_id);
+
+        CREATE INDEX IF NOT EXISTS idx_code_occ_file  ON code_occurrences(fileID);
+        CREATE INDEX IF NOT EXISTS idx_code_occ_code  ON code_occurrences(codeID);
+        CREATE INDEX IF NOT EXISTS idx_code_sent_code ON code_sentence(code_occ_id);
+        CREATE INDEX IF NOT EXISTS idx_code_sent_occ  ON code_sentence(occ_type, occ_id);
+        CREATE INDEX IF NOT EXISTS idx_code_para_code ON code_paragraph(code_occ_id);
+        CREATE INDEX IF NOT EXISTS idx_code_para_occ  ON code_paragraph(occ_type, occ_id);
     """)
     conn.commit()
     # Migrate existing databases that predate the mtime column
@@ -147,7 +187,20 @@ def delete_document(conn: sqlite3.Connection, file_id: int):
             OR (noun_occ_type='name' AND noun_occ_id IN
                 (SELECT nameOccurrenceID FROM name_occurrences WHERE fileID=?))
     """, (file_id, file_id, file_id))
+    for cooc_table in ("code_sentence", "code_paragraph"):
+        conn.execute(f"""
+            DELETE FROM {cooc_table} WHERE
+                code_occ_id IN
+                    (SELECT codeOccurrenceID FROM code_occurrences WHERE fileID=?)
+                OR (occ_type='noun' AND occ_id IN
+                    (SELECT nounOccurrenceID FROM noun_occurrences WHERE fileID=?))
+                OR (occ_type='name' AND occ_id IN
+                    (SELECT nameOccurrenceID FROM name_occurrences WHERE fileID=?))
+                OR (occ_type='code' AND occ_id IN
+                    (SELECT codeOccurrenceID FROM code_occurrences WHERE fileID=?))
+        """, (file_id, file_id, file_id, file_id))
     # Occurrence tables
+    conn.execute("DELETE FROM code_occurrences WHERE fileID=?", (file_id,))
     conn.execute("DELETE FROM noun_occurrences WHERE fileID=?", (file_id,))
     conn.execute("DELETE FROM name_occurrences WHERE fileID=?", (file_id,))
     conn.execute("DELETE FROM verb_occurrences WHERE fileID=?", (file_id,))
@@ -228,5 +281,6 @@ def get_stats(conn) -> dict:
     tables = [
         "documents", "nouns", "noun_occurrences", "names", "name_occurrences",
         "verbs", "verb_occurrences", "noun_sentence", "noun_paragraph", "noun_verb_sentence",
+        "codes", "code_occurrences", "code_sentence", "code_paragraph",
     ]
     return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}

@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.8.1 — 2026-10-25  Very long texts
+
+Spreadsheets without blank lines became one paragraph of several million
+characters and failed with spaCy error `[E088] Text of length … exceeds
+maximum of 1000000`. Larger texts also had to be analysed and held in memory
+as a whole (≈ 1 hour and several GB for a 150-million-character sheet).
+
+- Paragraphs longer than 100,000 characters are split at line breaks
+  (`processor._chunk_spans()`) before they are passed to spaCy.
+- Documents with more than 1,000,000 characters are processed in sections
+  (`processor.split_sections()`, `analyze_sections()`): `_analyze_file()`
+  returns a `LargeDocument` with the sections instead of an analysis; the GUI
+  processes these in a new **Pass 5**, analysing sections in parallel workers
+  and writing each one to the DB right away, then commits the document. The
+  command line (`process_document()`) writes section by section as well.
+- Sections are cut at paragraph or chunk boundaries, so occurrences,
+  positions and sentence/paragraph pairs are identical to a single pass.
+- Codes: `,` only joins digits (`63,31`); comma-separated lists such as
+  `user1,user2` are split into separate codes.
+
+## v1.8 — 2026-10-25  Numbers and codes
+
+Tokens that contain digits were dropped (`if not token.is_alpha`), so file
+numbers, dates, error codes or IP addresses in documents and log files could
+not be found.
+
+**New tables** (`db.py`): `codes`, `code_occurrences`, `code_sentence`,
+`code_paragraph` (see README, *Database schema*). They are created in existing
+databases too; `delete_document()` and `get_stats()` cover them.
+
+**What is a code** (`processor.py`): a run of letters/digits joined by
+`. _ : / - +` (or `,` between digits) that contains a digit (2–64 characters), found by regex on the
+sentence text so that `2024-08-23` or `192.168.0.1` stay one code; plus
+upper-case abbreviations (2–10 letters) that are not nouns, names or verbs.
+Codes are paired with the nouns, names and codes of the same sentence and
+paragraph, subject to `MAX_ENTITIES_PER_CONTEXT`.
+
+`DocumentAnalysis` gains `codes`, `code_sent_pairs`, `code_para_pairs`;
+`write_analysis()` writes them. Nouns, names and verbs are unchanged.
+
+**Existing databases** have no codes for documents indexed before v1.8. Index
+the folder into a new database to get codes for all documents.
+
+---
+
 ## v1.6 — 2026-05-11  Parallel processing
 
 Indexing now runs the slow NLP step on multiple CPU cores simultaneously,
